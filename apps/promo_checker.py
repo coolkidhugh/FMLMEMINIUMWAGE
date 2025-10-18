@@ -70,3 +70,4 @@ def run_promo_checker_app():
                         st.dataframe(result, use_container_width=True)
                 except Exception as e:
                     st.error(f"处理文件时发生未知错误: {e}")
+
