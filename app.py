@@ -1,79 +1,74 @@
-import streamlit as st
-from streamlit_option_menu import option_menu
-from utils import check_password
-
-# --- Import all the app modules ---
-from apps import ocr, daily_occupancy, comparison, analyzer, ctrip_tools, data_analysis, briefing_generator, common_phrases
+# ==============================================================================
+# --- [全局配置] 应用元数据 ---
+# ==============================================================================
+APP_VERSION = "2.5.1"
+APP_NAME = "金陵工具箱"
 
 # ==============================================================================
-# --- Main App Router ---
+# --- [OCR工具] 配置 ---
 # ==============================================================================
+TEAM_TYPE_MAP = {
+    "CON": "会议团",
+    "FIT": "散客团",
+    "WA": "婚宴团"
+}
+DEFAULT_TEAM_TYPE = "旅游团"
 
-def main():
-    """
-    Main function to run the Streamlit application.
-    It handles page configuration, authentication, and routing to different tools.
-    """
-    st.set_page_config(layout="wide", page_title="金陵工具箱")
+# 所有已知房型代码
+ALL_ROOM_CODES = [
+    "DETN", "DKN", "DQN", "DQS", "DSKN", "DSTN", "DTN", "EKN", "EKS", "ESN", "ESS",
+    "ETN", "ETS", "FSN", "FSB", "FSC", "OTN", "PSA", "PSB", "RSN", "SKN",
+    "SQN", "SQS", "SSN", "SSS", "STN", "STS", "JDEN", "JDKN", "JDKS", "JEKN",
+    "JESN", "JESS", "JETN", "JETS", "JKN", "JLKN", "JTN", "JTS", "PSC", "PSD",
+    "VCKN", "VCKD", "SITN", "JEN", "JIS", "JTIN"
+]
 
-    # --- Authentication Check ---
-    if not check_password():
-        st.stop() # Stop execution if the password is not correct
+# ==============================================================================
+# --- [团队到店统计] 配置 ---
+# ==============================================================================
+JINLING_ROOM_TYPES = [
+    'DETN', 'DKN', 'DKS', 'DQN', 'DQS', 'DSKN', 'DSTN', 'DTN',
+    'EKN', 'EKS', 'ESN', 'ESS', 'ETN', 'ETS', 'FSB', 'FSC', 'FSN',
+    'STN', 'STS', 'SKN', 'RSN', 'SQS', 'SQN'
+]
 
-    # --- Sidebar Navigation Menu ---
-    with st.sidebar:
-        st.image("https://placehold.co/250x100/000000/FFFFFF?text=Jinling+Toolbox", use_column_width=True)
-        app_choice = option_menu(
-            menu_title="金陵工具箱",
-            options=[
-                "OCR 工具", 
-                "每日出租率对照表", 
-                "比对平台", 
-                "团队到店统计", 
-                "携程对日期", 
-                "携程审单", 
-                "数据分析", 
-                "话术生成器", 
-                "常用话术"
-            ],
-            icons=[
-                "camera-reels-fill", 
-                "calculator", 
-                "kanban", 
-                "clipboard-data", 
-                "calendar-check", 
-                "person-check-fill", 
-                "graph-up-arrow", 
-                "blockquote-left", 
-                "card-text"
-            ],
-            menu_icon="tools",
-            default_index=0,
-        )
-        st.sidebar.markdown("---")
-        st.sidebar.info("这是一个将多个独立工具集成在一起的模块化应用。")
-        st.sidebar.markdown("V2.0 - Refactored Edition")
+YATAI_ROOM_TYPES = [
+    'JDEN', 'JDKN', 'JDKS', 'JEKN', 'JESN', 'JESS', 'JETN', 'JETS',
+    'JKN', 'JLKN', 'JTN', 'JTS', 'VCKD', 'VCKN'
+]
 
-    # --- Route to the selected app ---
-    if app_choice == "OCR 工具":
-        ocr.run_ocr_app()
-    elif app_choice == "每日出租率对照表":
-        daily_occupancy.run_daily_occupancy_app()
-    elif app_choice == "比对平台":
-        comparison.run_comparison_app()
-    elif app_choice == "团队到店统计":
-        analyzer.run_analyzer_app()
-    elif app_choice == "携程对日期":
-        ctrip_tools.run_ctrip_date_comparison_app()
-    elif app_choice == "携程审单":
-        ctrip_tools.run_ctrip_audit_app()
-    elif app_choice == "数据分析":
-        data_analysis.run_data_analysis_app()
-    elif app_choice == "话术生成器":
-        briefing_generator.run_morning_briefing_app()
-    elif app_choice == "常用话术":
-        common_phrases.run_common_phrases_app()
 
-if __name__ == "__main__":
-    main()
+# ==============================================================================
+# --- [携程审单 & 对日期] 配置 ---
+# ==============================================================================
+# “携程审单”工具的列名映射
+CTRIP_AUDIT_COLUMN_MAP_CTRIP = {
+    '订单号': ['订单号', '订单号码'],
+    '确认号': ['确认号', '酒店确认号', '确订号'],
+    '客人姓名': ['客人姓名', '姓名', '入住人', '宾客姓名'],
+    '到达': ['到达', '入住日期', '到店日期'],
+    '离开': ['离开', '离店日期']
+}
+
+CTRIP_AUDIT_COLUMN_MAP_SYSTEM = {
+    '预订号': ['预订号', '预定号'],
+    '第三方预定号': ['第三方预定号', '第三方预订号'],
+    '姓名': ['姓名', '名字', '客人姓名', '宾客姓名'],
+    '离开': ['离开', '离店日期'],
+    '房号': ['房号'],
+    '状态': ['状态']
+}
+
+# “携程对日期”工具的列名映射
+CTRIP_DATE_COMPARE_SYSTEM_COLS = {'id': '预订号', 'checkin': '到达', 'checkout': '离开'}
+CTRIP_DATE_COMPARE_CTRIP_COLS = {'id': '预定号', 'checkin': '入住日期', 'checkout': '离店日期'}
+
+# ==============================================================================
+# --- [新增] [连住权益审核] 配置 ---
+# ==============================================================================
+PROMO_CHECKER_COLUMN_MAP = {
+    '订单号': ['确认号', '订单号', '预订号', '预定号'],
+    '备注': ['备注', 'Remark'],
+    '房类': ['房类', '房型', 'Room Type']
+}
 
