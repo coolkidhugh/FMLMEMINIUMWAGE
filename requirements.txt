@@ -1,0 +1,10 @@
+pandas
+numpy
+streamlit
+Pillow
+streamlit-option-menu
+alibabacloud_ocr_api20210707
+alibabacloud_tea_openapi
+alibabacloud_tea_util
+openpyxl
+xlsxwriter
