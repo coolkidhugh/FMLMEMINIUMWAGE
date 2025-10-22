@@ -96,7 +96,10 @@ def extract_jlg_numbers(text):
         return []
     # 操，这个正则表达式找 (JLG)后面的数字
     jlg_numbers = re.findall(r'\(JLG\)(\d+)', text)
-    return list(set(jlg_numbers)) # 去重后返回列表
+    # 操，同时找 JLG)数字 这种傻逼格式
+    jlg_numbers_alt = re.findall(r'JLG\)(\d+)', text)
+    all_numbers = jlg_numbers + jlg_numbers_alt
+    return list(set(all_numbers)) # 去重后返回列表
 
 def convert_status_to_status2(status):
     """操，把状态码转成中文描述"""
@@ -116,9 +119,9 @@ def run_meituan_checker_app():
     """运行美团邮件审核工具的 Streamlit 界面。"""
     st.title(f"美团邮件审核")
     st.markdown("""
-    操，这个工具是用来帮你从美团的 `.eml` 邮件里抠出 `(JLG)` 号码，
-    然后去你的**系统订单 Excel** 里找到对应的客人信息。
-    1.  上传包含 `(JLG)` 号码的 `.eml` 文件 (可以一次传多个)。
+    操，这个工具是用来帮你从美团的 `.eml` 邮件里抠出 `(JLG)` 或 `JLG)` 号码，
+    然后去你的**系统订单 Excel** 的 **`预订号`** 列里找到对应的客人信息。
+    1.  上传包含号码的 `.eml` 文件 (可以一次传多个)。
     2.  上传你的**系统订单 Excel** 文件。
     3.  点“开始匹配”，老子就把结果给你列出来。
     """)
@@ -142,7 +145,7 @@ def run_meituan_checker_app():
                     if eml_text:
                         jlg_found = extract_jlg_numbers(eml_text)
                         if jlg_found: all_jlg_numbers.extend(jlg_found)
-                        else: st.warning(f"文件 '{eml_file.name}' 中没有找到 `(JLG)` 号码。")
+                        else: st.warning(f"文件 '{eml_file.name}' 中没有找到 `(JLG)` 或 `JLG)` 号码。") # 操，改了提示
                     else: eml_parsing_errors.append(eml_file.name)
                 except Exception as e:
                     st.error(f"处理文件 '{eml_file.name}' 时出错: {e}")
@@ -150,32 +153,45 @@ def run_meituan_checker_app():
         if eml_parsing_errors: st.error(f"以下 EML 文件解析失败，已被跳过: {', '.join(eml_parsing_errors)}")
 
         unique_jlg_numbers = list(set(all_jlg_numbers))
-        if not unique_jlg_numbers: st.error("操，所有上传的 EML 文件里都没找到有效的 `(JLG)` 号码！活儿没法干了。"); st.stop()
+        if not unique_jlg_numbers: st.error("操，所有上传的 EML 文件里都没找到有效的 `(JLG)` 或 `JLG)` 号码！活儿没法干了。"); st.stop() # 操，改了提示
         st.info(f"从 EML 文件中成功提取到 {len(unique_jlg_numbers)} 个唯一的 JLG 号码。")
 
         try:
-            # --- 操，强制把可能的列读成字符串，特别是'预订号'和'房号' ---
-            possible_cols = MEITUAN_SYSTEM_COLUMN_MAP.get('预订号', []) + MEITUAN_SYSTEM_COLUMN_MAP.get('房号', [])
+            # --- 操，强制把可能的列读成字符串，特别是'预订号', '房号', '第三方预定号' ---
+            possible_cols = (
+                MEITUAN_SYSTEM_COLUMN_MAP.get('预订号', []) +
+                MEITUAN_SYSTEM_COLUMN_MAP.get('房号', []) +
+                MEITUAN_SYSTEM_COLUMN_MAP.get('第三方预定号', [])
+            )
             dtype_map = {col: str for col in possible_cols} # 给所有可能的列名设置 dtype=str
             system_df = pd.read_excel(uploaded_system_excel, dtype=dtype_map)
             system_df.columns = system_df.columns.str.strip() # 清理列名中的空格
             missing_cols = find_and_rename_columns(system_df, MEITUAN_SYSTEM_COLUMN_MAP)
-            if missing_cols: st.error(f"操！系统订单 Excel 文件里找不到必需的列: {', '.join(missing_cols)}。没法继续了。"); st.stop()
-            if '预订号' not in system_df.columns: st.error(f"操！在系统订单 Excel 文件里找不到 '预订号' 列（或其别名）。"); st.stop()
+            # 操，第三方预定号不是必须的了，从报错里去掉
+            required_check_cols = [col for col in MEITUAN_SYSTEM_COLUMN_MAP.keys() if col != '第三方预定号']
+            missing_required = [col for col in required_check_cols if col not in system_df.columns]
+            if missing_required: st.error(f"操！系统订单 Excel 文件里找不到必需的列: {', '.join(missing_required)}。没法继续了。"); st.stop()
+
+            # if '预订号' not in system_df.columns: st.error(f"操！在系统订单 Excel 文件里找不到 '预订号' 列（或其别名）。"); st.stop() # 上面检查过了
             system_df['预订号'] = system_df['预订号'].astype(str).str.strip() # 再次确保是字符串并清理空白
+            # 操，第三方预定号也处理一下，如果没有就算了
+            if '第三方预定号' in system_df.columns:
+                 system_df['第三方预定号'] = system_df['第三方预定号'].astype(str).str.strip()
+
         except Exception as e:
             st.error(f"读取或处理系统订单 Excel 文件时出错: {e}"); st.stop()
 
         results, found_count, not_found_jlg = [], 0, []
         with st.spinner("正在系统订单中匹配 JLG 号码..."):
-            # 操，这是你新要的那几列, 但要先检查它们是不是真的存在于 system_df 里
-            base_required_info_cols = ['姓名', '状态', '房号', '到达', '离开', '预订号']
-            # --- 操，这里是改动点：只包括 system_df 里真实存在的列 ---
+            # 操，这是你要的那几列, 但要先检查它们是不是真的存在于 system_df 里
+            base_required_info_cols = ['姓名', '状态', '房号', '到达', '离开', '预订号', '第三方预定号'] # 操，把第三方预定号加回来
+            # --- 只包括 system_df 里真实存在的列 ---
             cols_to_extract = [col for col in base_required_info_cols if col in system_df.columns]
             missing_extract_cols = [col for col in base_required_info_cols if col not in cols_to_extract]
             if missing_extract_cols: st.warning(f"系统订单中缺少以下列，结果中将不包含这些信息: {', '.join(missing_extract_cols)}")
 
             for jlg_number in unique_jlg_numbers:
+                # --- 操，核心匹配逻辑在这里：用JLG号码匹配 '预订号' 列 ---
                 match = system_df[system_df['预订号'] == jlg_number.strip()]
                 if not match.empty:
                     found_count += 1
@@ -189,6 +205,9 @@ def run_meituan_checker_app():
                          elif col == '状态' and pd.notna(match_data[col]):
                              result_entry[col] = str(match_data[col]).strip().upper() # 原始状态码
                              result_entry['状态2'] = convert_status_to_status2(match_data[col]) # 中文状态
+                         # 操，第三方预定号直接取值就行
+                         elif col == '第三方预定号' and pd.notna(match_data[col]):
+                              result_entry[col] = match_data[col]
                          elif pd.notna(match_data[col]):
                              result_entry[col] = match_data[col]
                          else:
@@ -198,6 +217,9 @@ def run_meituan_checker_app():
                     if '状态' not in cols_to_extract:
                         result_entry['状态'] = None
                         result_entry['状态2'] = None
+                    # 如果原始数据里就没有第三方预定号列，也给它加上空的
+                    if '第三方预定号' not in cols_to_extract:
+                        result_entry['第三方预定号'] = None
 
                     results.append(result_entry)
                 else:
@@ -207,8 +229,8 @@ def run_meituan_checker_app():
 
         if results:
             result_df = pd.DataFrame(results)
-            # 操，按照你指定的傻逼顺序排好
-            final_cols_order = ['姓名', '状态', '状态2', '房号', '到达', '离开', '预订号', 'JLG号码']
+            # 操，按照你指定的傻逼顺序排好，把第三方预定号也加进来
+            final_cols_order = ['姓名', '状态', '状态2', '房号', '到达', '离开', '预订号', '第三方预定号', 'JLG号码']
             # 只保留实际存在的列
             existing_final_cols = [col for col in final_cols_order if col in result_df.columns]
             result_df = result_df[existing_final_cols]
@@ -216,7 +238,7 @@ def run_meituan_checker_app():
             st.dataframe(result_df.fillna('')) # 把空值显示为空字符串，好看点
 
             excel_data = to_excel({"美团匹配结果": result_df})
-            st.download_button(label="📥 下载匹配结果 (.xlsx)", data=excel_data, file_name="meituan_match_results_updated.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download-meituan-results-upd")
+            st.download_button(label="📥 下载匹配结果 (.xlsx)", data=excel_data, file_name="meituan_match_results_final.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download-meituan-results-final")
         else:
             st.warning("在系统订单中没有找到任何与 EML 文件中 JLG 号码匹配的记录。")
 
