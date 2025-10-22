@@ -163,8 +163,13 @@ def run_meituan_checker_app():
                 MEITUAN_SYSTEM_COLUMN_MAP.get('房号', []) +
                 MEITUAN_SYSTEM_COLUMN_MAP.get('第三方预定号', [])
             )
-            dtype_map = {col: str for col in possible_cols} # 给所有可能的列名设置 dtype=str
-            system_df = pd.read_excel(uploaded_system_excel, dtype=dtype_map)
+            # --- 操，还要把日期列也考虑进去，免得被读成数字 ---
+            date_cols = MEITUAN_SYSTEM_COLUMN_MAP.get('到达', []) + MEITUAN_SYSTEM_COLUMN_MAP.get('离开', [])
+            all_possible_str_cols = list(set(possible_cols + date_cols)) # 合并并去重
+            dtype_map = {col: str for col in all_possible_str_cols} # 给所有可能的列名设置 dtype=str
+
+            # --- 操，读Excel的时候就用dtype_map，并且保留日期格式 ---
+            system_df = pd.read_excel(uploaded_system_excel, dtype=dtype_map, parse_dates=False) # parse_dates=False 防止pandas自作聪明
             system_df.columns = system_df.columns.str.strip() # 清理列名中的空格
             missing_cols = find_and_rename_columns(system_df, MEITUAN_SYSTEM_COLUMN_MAP)
             # 操，第三方预定号不是必须的了，从报错里去掉
@@ -198,18 +203,31 @@ def run_meituan_checker_app():
                     match_data = match.iloc[0]
                     result_entry = {'JLG号码': jlg_number} # 操，把JLG号码也加进去，方便核对
                     for col in cols_to_extract: # 只处理实际存在的列
+                         # --- 操，日期格式在这里改！尝试按 YY/MM/DD HH:MM 格式化 ---
                          if col in ['到达', '离开'] and pd.notna(match_data[col]):
-                             try: result_entry[col] = pd.to_datetime(match_data[col]).strftime('%Y-%m-%d')
-                             except Exception: result_entry[col] = str(match_data[col]) # 日期格式不对就直接转字符串
+                             try:
+                                 # 尝试多种可能的输入格式进行转换
+                                 dt_obj = pd.to_datetime(match_data[col], errors='coerce', infer_datetime_format=True)
+                                 if pd.notna(dt_obj):
+                                     # 如果包含时间信息 (不是午夜0点)，则保留时间
+                                     if dt_obj.hour != 0 or dt_obj.minute != 0 or dt_obj.second != 0:
+                                         result_entry[col] = dt_obj.strftime('%y/%m/%d %H:%M')
+                                     else: # 否则只保留日期
+                                         result_entry[col] = dt_obj.strftime('%y/%m/%d')
+                                 else: # 如果转换失败，直接用原始字符串
+                                     result_entry[col] = str(match_data[col]).strip() # 操，加上strip
+                             except Exception: # 保底措施，如果上面都失败了，直接转字符串
+                                 result_entry[col] = str(match_data[col]).strip() # 操，加上strip
                          # 操，状态列要特殊处理一下
                          elif col == '状态' and pd.notna(match_data[col]):
                              result_entry[col] = str(match_data[col]).strip().upper() # 原始状态码
                              result_entry['状态2'] = convert_status_to_status2(match_data[col]) # 中文状态
                          # 操，第三方预定号直接取值就行
                          elif col == '第三方预定号' and pd.notna(match_data[col]):
-                              result_entry[col] = match_data[col]
+                              result_entry[col] = str(match_data[col]).strip() # 操，加上strip
                          elif pd.notna(match_data[col]):
-                             result_entry[col] = match_data[col]
+                             # 操，其他列直接转字符串，防止出现奇怪的类型
+                             result_entry[col] = str(match_data[col]).strip()
                          else:
                              result_entry[col] = None # 如果是空的，就填 None
 
@@ -238,7 +256,7 @@ def run_meituan_checker_app():
             st.dataframe(result_df.fillna('')) # 把空值显示为空字符串，好看点
 
             excel_data = to_excel({"美团匹配结果": result_df})
-            st.download_button(label="📥 下载匹配结果 (.xlsx)", data=excel_data, file_name="meituan_match_results_final.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download-meituan-results-final")
+            st.download_button(label="📥 下载匹配结果 (.xlsx)", data=excel_data, file_name="meituan_match_results_final_v2.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download-meituan-results-final-v2") # 操，改个文件名
         else:
             st.warning("在系统订单中没有找到任何与 EML 文件中 JLG 号码匹配的记录。")
 
