@@ -158,7 +158,7 @@ def run_meituan_checker_app():
             possible_cols = MEITUAN_SYSTEM_COLUMN_MAP.get('预订号', []) + MEITUAN_SYSTEM_COLUMN_MAP.get('房号', [])
             dtype_map = {col: str for col in possible_cols} # 给所有可能的列名设置 dtype=str
             system_df = pd.read_excel(uploaded_system_excel, dtype=dtype_map)
-            system_df.columns = system_df.columns.str.strip()
+            system_df.columns = system_df.columns.str.strip() # 清理列名中的空格
             missing_cols = find_and_rename_columns(system_df, MEITUAN_SYSTEM_COLUMN_MAP)
             if missing_cols: st.error(f"操！系统订单 Excel 文件里找不到必需的列: {', '.join(missing_cols)}。没法继续了。"); st.stop()
             if '预订号' not in system_df.columns: st.error(f"操！在系统订单 Excel 文件里找不到 '预订号' 列（或其别名）。"); st.stop()
@@ -168,10 +168,11 @@ def run_meituan_checker_app():
 
         results, found_count, not_found_jlg = [], 0, []
         with st.spinner("正在系统订单中匹配 JLG 号码..."):
-            # 操，这是你新要的那几列
-            required_info_cols = ['姓名', '状态', '房号', '到达', '离开', '预订号']
-            cols_to_extract = [col for col in required_info_cols if col in system_df.columns]
-            missing_extract_cols = [col for col in required_info_cols if col not in cols_to_extract]
+            # 操，这是你新要的那几列, 但要先检查它们是不是真的存在于 system_df 里
+            base_required_info_cols = ['姓名', '状态', '房号', '到达', '离开', '预订号']
+            # --- 操，这里是改动点：只包括 system_df 里真实存在的列 ---
+            cols_to_extract = [col for col in base_required_info_cols if col in system_df.columns]
+            missing_extract_cols = [col for col in base_required_info_cols if col not in cols_to_extract]
             if missing_extract_cols: st.warning(f"系统订单中缺少以下列，结果中将不包含这些信息: {', '.join(missing_extract_cols)}")
 
             for jlg_number in unique_jlg_numbers:
@@ -180,10 +181,10 @@ def run_meituan_checker_app():
                     found_count += 1
                     match_data = match.iloc[0]
                     result_entry = {'JLG号码': jlg_number} # 操，把JLG号码也加进去，方便核对
-                    for col in cols_to_extract:
+                    for col in cols_to_extract: # 只处理实际存在的列
                          if col in ['到达', '离开'] and pd.notna(match_data[col]):
                              try: result_entry[col] = pd.to_datetime(match_data[col]).strftime('%Y-%m-%d')
-                             except Exception: result_entry[col] = str(match_data[col])
+                             except Exception: result_entry[col] = str(match_data[col]) # 日期格式不对就直接转字符串
                          # 操，状态列要特殊处理一下
                          elif col == '状态' and pd.notna(match_data[col]):
                              result_entry[col] = str(match_data[col]).strip().upper() # 原始状态码
