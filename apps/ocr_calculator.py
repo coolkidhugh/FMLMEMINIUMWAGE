@@ -2,89 +2,65 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import re
-import requests
-import base64
 import io
+import json # 操，阿里SDK要用
 from PIL import Image
+
+# --- 操，导入阿里云的傻逼SDK ---
+try:
+    from alibabacloud_ocr_api20210707.client import Client as OcrClient
+    from alibabacloud_tea_openapi import models as open_api_models
+    from alibabacloud_ocr_api20210707 import models as ocr_models
+    ALIYUN_SDK_AVAILABLE = True
+except ImportError:
+    ALIYUN_SDK_AVAILABLE = False
 
 def run_ocr_calculator_app():
     st.title("金陵工具箱 - OCR出租率计算器")
-    st.markdown("操，上传你那个手写的破表，老子用 DeepSeek 给你读出来，你再改，改完老子给你算！")
+    st.markdown("操，上传你那个手写的破表，老子用**阿里云**给你读出来，你再改，改完老子给你算！")
 
-    # --- DeepSeek OCR 引擎 (带图片压缩) ---
-    def get_deepseek_ocr_text(image_bytes: bytes) -> str:
-        if "deepseek_credentials" not in st.secrets or not st.secrets.deepseek_credentials.get("api_key"):
-            st.error("操！你他妈的还没在 .streamlit/secrets.toml 里配 DeepSeek API Key！")
+    # --- 阿里云 OCR 引擎 (带图片压缩) ---
+    def get_aliyun_ocr_text(image_bytes: bytes) -> str:
+        if not ALIYUN_SDK_AVAILABLE:
+            st.error("操！你他妈的没装阿里云SDK！ 'pip install alibabacloud_ocr_api20210707'")
             return None
-        api_key = st.secrets.deepseek_credentials.get("api_key")
-
-        # --- 操，图片压缩逻辑 ---
+        if "aliyun_credentials" not in st.secrets:
+            st.error("操！阿里云凭证未在 Streamlit 的 Secrets 中配置。")
+            return None
+        access_key_id = st.secrets.aliyun_credentials.get("access_key_id")
+        access_key_secret = st.secrets.aliyun_credentials.get("access_key_secret")
+        if not access_key_id or not access_key_secret:
+            st.error("操！阿里云 AccessKey ID 或 Secret 未在 Secrets 中正确配置。")
+            return None
+        
         try:
-            img = Image.open(io.BytesIO(image_bytes))
+            config = open_api_models.Config(access_key_id=access_key_id, access_key_secret=access_key_secret, endpoint='ocr-api.cn-hangzhou.aliyuncs.com')
+            client = OcrClient(config)
             
-            # 保持宽高比，限制最大宽度为 1024
-            max_width = 1024
-            if img.width > max_width:
-                scale = max_width / img.width
-                new_height = int(img.height * scale)
-                img = img.resize((max_width, new_height), Image.LANCZOS)
-
+            # --- 操，图片压缩逻辑还得留着 ---
+            img = Image.open(io.BytesIO(image_bytes))
             if img.mode == 'RGBA':
                 img = img.convert('RGB')
             
             buffered = io.BytesIO()
             img.save(buffered, format="JPEG", quality=85) # 操，压成85质量的JPG
-            img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-            st.info(f"图片压缩完毕，压缩后大小: {len(img_base64) / 1024:.2f} KB")
-
-        except Exception as e:
-            st.error(f"操，压缩图片时出错了: {e}")
-            return None
-        # --- 压缩结束 ---
-
-        url = "https://api.deepseek.com/v1/chat/completions"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}"
-        }
-        
-        payload = {
-            "model": "deepseek-vl",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "请精确识别这张表格图片中的所有文字和数字，按从上到下、从左到右的顺序返回纯文本。"},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{img_base64}"
-                            }
-                        }
-                    ]
-                }
-            ],
-            "max_tokens": 4000,
-            "temperature": 0.1,
-        }
-
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
-            response.raise_for_status()
-            data = response.json()
+            buffered.seek(0)
+            st.info(f"图片压缩完毕，准备上传阿里云...")
+            # --- 压缩结束 ---
             
-            if "choices" in data and len(data["choices"]) > 0:
-                content = data["choices"][0].get("message", {}).get("content", "")
-                return content
+            request = ocr_models.RecognizeGeneralRequest(body=buffered)
+            response = client.recognize_general(request)
+            
+            if response.status_code == 200 and response.body and response.body.data:
+                data = json.loads(response.body.data)
+                return data.get('content', '')
             else:
-                st.error("DeepSeek API 返回了空数据。")
-                return None
-        except requests.exceptions.RequestException as e:
-            st.error(f"调用 DeepSeek API 失败: {e}")
-            if e.response is not None:
-                st.error(f"返回内容: {e.response.text}")
-            else:
-                st.error("操，DeepSeek 没返回任何东西。")
+                error_message = '无详细信息'
+                if response.body and hasattr(response.body, 'message'):
+                   error_message = response.body.message
+                raise Exception(f"阿里云 OCR API 返回错误: {error_message}")
+        except Exception as e:
+            st.error(f"调用阿里云 OCR API 失败: {e}")
             return None
 
     # --- 解析文本并填充表格的傻逼逻辑 ---
@@ -112,22 +88,6 @@ def run_ocr_calculator_app():
                 current_df = "YT"
                 continue
             
-            # 操，用正则表达式硬抠数字和日期
-            # 匹配 "20/10 一 78.4% 81.9% 6.5% 84.9% 84.9% 6.5% 577.4" 这种格式
-            # 或者 "20/10 一 67.4% 81.9% 18.1% 81.9% 82.1% 18.1% 706.9"
-            # 或者 "26/10 日 86.9% 60.5% 19.7% 67.5% 76.6% 52.7% 779.2" (操，这个%还可能没有)
-            
-            # 正则解释:
-            # (\d{1,2}/\d{1,2})\s+      # 1. 日期 (20/10)
-            # ([\u4e00-\u9fa5])\s+      # 2. 星期 (一)
-            # ([\d\.]+)%?\s+           # 3. 当日预计
-            # ([\d\.]+)%?\s+           # 4. 当日实际
-            # ([\d\.\-]+)%?\s+         # 5. 当日增加率 (妈的这个不填，我们自己算)
-            # ([\d\.]+)%?\s+           # 6. 周一预计
-            # ([\d\.]+)%?\s+           # 7. 当日实际 (操，又来一个，PDF上是这个)
-            # ([\d\.\-]+)%?\s+         # 8. 增加百分率 (这个也不填)
-            # ([\d\.]+)$                # 9. 平均房价
-            
             # 操，简化版正则，只抓我们要填的
             pattern = re.compile(r"(\d{1,2}/\d{1,2})\s+([\u4e00-\u9fa5])\s+([\d\.]+)%?\s+([\d\.]+)%?\s+[\d\.\-]+%?\s+([\d\.]+)%?\s+([\d\.]+)%?\s+[\d\.\-]+%?\s+([\d\.]+)$")
             match = pattern.search(line)
@@ -137,15 +97,12 @@ def run_ocr_calculator_app():
                     date = match.group(1)
                     weekday = match.group(2)
                     daily_forecast = float(match.group(3))
-                    daily_actual = float(match.group(4))
+                    daily_actual_raw = float(match.group(4)) # 这是OCR读的第一个“当日实际”
                     monday_forecast = float(match.group(5))
-                    # 操，第6组 (([\d\.]+)%?) 是亚太楼的 "当日实际"，金陵楼的在第7组
-                    # 但你妈的 DeepSeek 可能会把两个当日实际读成一样的
-                    # 我们就用第6组吧，反正后面要改
-                    # 妈的，看了下你的表，周一预计后面那个才是真的 "当日实际"，操，那就是第6组
-                    daily_actual_2 = float(match.group(6)) # 用这个当实际值
+                    daily_actual_2 = float(match.group(6)) # 这是OCR读的第二个“当日实际”
                     avg_price = float(match.group(7))
 
+                    # 操，用第二个“当日实际”，那个才是对的
                     if current_df == "JL" and jl_row_index < 7:
                         jl_df.iloc[jl_row_index] = [date, weekday, daily_forecast, daily_actual_2, monday_forecast, avg_price]
                         jl_row_index += 1
@@ -191,20 +148,20 @@ def run_ocr_calculator_app():
         image_bytes = uploaded_file.getvalue()
         st.image(image_bytes, caption="你传的傻逼图片", width=300)
 
-        if st.button("用 DeepSeek 识别并填表", type="primary"):
-            with st.spinner('操，DeepSeek 正在玩命识别...'):
-                ocr_text = get_deepseek_ocr_text(image_bytes)
+        if st.button("用 阿里云 识别并填表", type="primary"):
+            with st.spinner('操，阿里云 正在玩命识别...'):
+                ocr_text = get_aliyun_ocr_text(image_bytes)
             
             if ocr_text:
                 st.success("操，识别完了！")
-                with st.expander("点开看 DeepSeek 吐出来的原文"):
+                with st.expander("点开看 阿里云 吐出来的原文"):
                     st.text_area("OCR 原始文本", ocr_text, height=300)
                 
                 jl_df, yt_df = parse_ocr_to_dataframe(ocr_text)
                 st.session_state['jl_df'] = jl_df
                 st.session_state['yt_df'] = yt_df
             else:
-                st.error("操，DeepSeek 啥也没返回，是不是 Key 错了或者网断了？")
+                st.error("操，阿里云 啥也没返回。")
 
     if 'jl_df' in st.session_state:
         st.markdown("---")
