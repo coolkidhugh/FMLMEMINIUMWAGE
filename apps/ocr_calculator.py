@@ -79,7 +79,7 @@ def get_aliyun_ocr(image: Image.Image) -> str:
 def parse_ocr_to_dataframe(ocr_text: str, building_name: str) -> pd.DataFrame:
     """
     操，把阿里云返回的那坨狗屎一样的文本，硬塞进一个DataFrame里。
-    (V4：妈的，这回把 'xx.x%/yy.y%' 当成字符串原样塞进去)
+    (V5：妈的，这回能处理 'xx.x%/yy.y%' 和 OCR 漏掉 '星期' 列的傻逼情况)
     """
     
     def get_string_from_part(part):
@@ -91,11 +91,11 @@ def parse_ocr_to_dataframe(ocr_text: str, building_name: str) -> pd.DataFrame:
     # 妈的，先定义好表格结构
     today = date.today()
     days = [(today + timedelta(days=i)) for i in range(7)]
-    weekdays_zh = ["一", "二", "三", "四", "五", "六", "日"]
+    weekdays_zh_map = ["一", "二", "三", "四", "五", "六", "日"]
     
     initial_data = {
         "日期": [d.strftime("%m/%d") for d in days],
-        "星期": [weekdays_zh[d.weekday()] for d in days],
+        "星期": [weekdays_zh_map[d.weekday()] for d in days],
         "当日预计 (%)": ["0.0"] * 7, # 操，改成字符串
         "当日实际 (%)": ["0.0"] * 7, # 操，改成字符串
         "周一预计 (%)": ["0.0"] * 7, # 操，改成字符串
@@ -111,6 +111,7 @@ def parse_ocr_to_dataframe(ocr_text: str, building_name: str) -> pd.DataFrame:
     building_lines = []
     found_building = False
     
+    other_building = "亚太商务楼" if building_name == "金陵楼" else "金陵楼"
     # 操，正则表达式，用来匹配像 "20/10" 或 "20-10" 这样的日期
     date_regex = re.compile(r'\d{1,2}[/-]\d{1,2}') 
 
@@ -122,9 +123,10 @@ def parse_ocr_to_dataframe(ocr_text: str, building_name: str) -> pd.DataFrame:
         if building_name in line:
             found_building = True
         
-        if "亚太商务楼" in line or "金陵楼" in line:
-            if building_name not in line and found_building: # 碰到下一个楼名了，停
-                break
+        # 操，如果碰到了另一个楼，就关开关，滚蛋
+        if other_building in line and building_name not in line:
+            found_building = False
+            break 
         
         if found_building:
             # 操，检查这行有没有日期，有日期才算数据行
@@ -142,30 +144,39 @@ def parse_ocr_to_dataframe(ocr_text: str, building_name: str) -> pd.DataFrame:
             break
         
         parts = line.split()
-        
         data_parts = []
-        found_date = False
+        
         for i, part in enumerate(parts):
             if date_regex.search(part):
-                if (i + 1) < len(parts): # 确保星期列存在
-                    data_parts = parts[i+2:]
-                    found_date = True
-                    break
+                # 操！找到日期了！
+                if (i + 1) < len(parts):
+                    # 妈的，检查下一个是不是 "一", "二", "三" ...
+                    next_part = parts[i+1].strip()
+                    if next_part in weekdays_zh_map:
+                        # 操，是星期，数据从 i+2 开始
+                        if (i + 2) < len(parts):
+                            data_parts = parts[i+2:]
+                    else:
+                        # 操，不是星期，OCR把星期搞丢了，数据从 i+1 开始
+                        data_parts = parts[i+1:]
+                    break # 找到数据了，滚
         
-        if not found_date or not data_parts:
+        if not data_parts:
+            # st.warning(f"操，在行 '{line}' 里没找到数据，跳过。") # 操，这条警告太烦了
             continue
 
         # 操，按顺序填进去
         # 假设 data_parts 顺序是：[预计, 实际, 增, 周一预计, 周一实际, 增百, 房价]
-        # 我们要: data_parts[0], data_parts[1], data_parts[3], data_parts[6]
-        
+        # (如果星期被跳过，就是这个顺序)
         try:
             if len(data_parts) >= 1:
                 df.at[row_index, "当日预计 (%)"] = get_string_from_part(data_parts[0])
             if len(data_parts) >= 2:
                 df.at[row_index, "当日实际 (%)"] = get_string_from_part(data_parts[1])
+            # data_parts[2] (当日增加率) 跳过
             if len(data_parts) >= 4: # 拿第4个
                 df.at[row_index, "周一预计 (%)"] = get_string_from_part(data_parts[3])
+            # data_parts[4] (周一实际), data_parts[5] (增加百分率) 跳过
             if len(data_parts) >= 7: # 拿第7个
                 df.at[row_index, "平均房价"] = get_string_from_part(data_parts[6])
         except Exception as e:
@@ -291,7 +302,7 @@ def create_word_doc(jl_df, yt_df, jl_summary, yt_summary):
 
         # 操，设置列宽 (大概齐)
         for table in [table_jl, table_yt]:
-            widths = [Inches(0.6), Inches(0.5), Inches(0.8), Inches(0.8), Inches(0.8), Inches(0.8), Inches(0.8), Inches(0.8)]
+            widths = [Inches(0.6), Inches(0.5), Inches(0.8), Inches(1.0), Inches(0.8), Inches(0.8), Inches(0.8), Inches(0.8)] # 操，把“当日实际”那列加宽了
             for i, width in enumerate(widths):
                 if i < len(table.columns):
                     for cell in table.columns[i].cells:
@@ -349,7 +360,7 @@ def run_ocr_calculator_app():
             st.session_state.jl_df,
             column_config={
                 "当日预计 (%)": st.column_config.TextColumn(label="当日预计 (%)", width="small"),
-                "当日实际 (%)": st.column_config.TextColumn(label="当日实际 (%)", width="small"),
+                "当日实际 (%)": st.column_config.TextColumn(label="当日实际 (%)", width="medium"), # 操，把这列加宽
                 "周一预计 (%)": st.column_config.TextColumn(label="周一预计 (%)", width="small"),
                 "平均房价": st.column_config.TextColumn(label="平均房价", width="small"),
                 "日期": st.column_config.TextColumn(label="日期", disabled=True),
@@ -364,7 +375,7 @@ def run_ocr_calculator_app():
             st.session_state.yt_df,
             column_config={
                 "当日预计 (%)": st.column_config.TextColumn(label="当日预计 (%)", width="small"),
-                "当日实际 (%)": st.column_config.TextColumn(label="当日实际 (%)", width="small"),
+                "当日实际 (%)": st.column_config.TextColumn(label="当日实际 (%)", width="medium"), # 操，把这列加宽
                 "周一预计 (%)": st.column_config.TextColumn(label="周一预计 (%)", width="small"),
                 "平均房价": st.column_config.TextColumn(label="平均房价", width="small"),
                 "日期": st.column_config.TextColumn(label="日期", disabled=True),
@@ -391,7 +402,11 @@ def run_ocr_calculator_app():
     if 'jl_df_final' in st.session_state:
         st.divider()
         st.subheader("最终结果 (金陵楼)")
-        st.dataframe(st.session_state.jl_df_final)
+        # 操，展示最终算好的表
+        st.dataframe(st.session_state.jl_df_final.style.format({
+             # 妈的，平均房价给你搞成2位小数
+            "平均房价": lambda x: f"{get_calc_value(x):.2f}" 
+        }))
         st.markdown(
             f"**本周实际：** `{st.session_state.jl_summary.get('本周实际', 'N/A')}` | "
             f"**周一预测：** `{st.session_state.jl_summary.get('周一预测', 'N/A')}` | "
@@ -399,7 +414,9 @@ def run_ocr_calculator_app():
         )
         
         st.subheader("最终结果 (亚太商务楼)")
-        st.dataframe(st.session_state.yt_df_final)
+        st.dataframe(st.session_state.yt_df_final.style.format({
+            "平均房价": lambda x: f"{get_calc_value(x):.2f}"
+        }))
         st.markdown(
             f"**本周实际：** `{st.session_state.yt_summary.get('本周实际', 'N/A')}` | "
             f"**周一预测：** `{st.session_state.yt_summary.get('周一预测', 'N/A')}` | "
