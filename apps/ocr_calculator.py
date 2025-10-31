@@ -62,10 +62,9 @@ def get_aliyun_table_ocr(image: Image.Image) -> dict:
         buffered.seek(0)
         
         # 1. 创建 RecognizeTableOcrRequest (*** 已修复 ***)
-        # 我们请求JSON格式的输出
+        # 移除了 'output_format' 参数，因为它不受支持
         request = ocr_models.RecognizeTableOcrRequest(
-            body=buffered,
-            output_format="json"
+            body=buffered
         )
         
         # 2. 调用 recognize_table_ocr 方法 (*** 已修复 ***)
@@ -254,7 +253,7 @@ def create_word_doc(jl_df, yt_df, jl_summary, yt_summary):
         doc = Document()
         # 设置中文字体
         doc.styles['Normal'].font.name = u'宋体'
-        doc.styles['Normal']._element.rPr.rFonts.set(qn('w:eastAsia'), u'宋体')
+        doc.styles['Normal']._element.rPr.rFonts.set(qn('w:eastAsia'), u'宋Т' )
         doc.styles['Normal'].font.size = Pt(10)
         
         # --- 金陵楼 ---
