@@ -391,5 +391,3 @@ def run_ocr_calculator_app():
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
 
-
-
