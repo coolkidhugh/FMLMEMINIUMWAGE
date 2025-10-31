@@ -61,16 +61,16 @@ def get_aliyun_table_ocr(image: Image.Image) -> dict:
         image.save(buffered, format="JPEG")
         buffered.seek(0)
         
-        # 1. 创建 RecognizeTableRequest
+        # 1. 创建 RecognizeTableOcrRequest (*** 已修复 ***)
         # 我们请求JSON格式的输出
-        request = ocr_models.RecognizeTableRequest(
+        request = ocr_models.RecognizeTableOcrRequest(
             body=buffered,
             output_format="json"
         )
         
-        # 2. 调用 recognize_table 方法
+        # 2. 调用 recognize_table_ocr 方法 (*** 已修复 ***)
         st.write("正在调用阿里云【表格识别】API...")
-        response = client.recognize_table(request)
+        response = client.recognize_table_ocr(request)
         st.write("API 调用完成。")
 
         if response.status_code == 200 and response.body and response.body.data:
@@ -461,3 +461,4 @@ if __name__ == "__main__":
     # 设置页面标题
     st.set_page_config(page_title="OCR出租率计算器 V2")
     run_ocr_calculator_app()
+
