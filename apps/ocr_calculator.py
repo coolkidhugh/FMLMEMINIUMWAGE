@@ -2,8 +2,8 @@ import streamlit as st
 import pandas as pd
 import re
 import io
-import traceback # 操，把这个傻逼玩意儿加上
-import json      # 操，操，操！把这个也他妈的加上！
+import traceback
+import json
 from PIL import Image
 from datetime import date, timedelta
 from docx import Document
@@ -15,32 +15,34 @@ from docx.oxml.ns import qn
 try:
     from alibabacloud_ocr_api20210707.client import Client as OcrClient
     from alibabacloud_tea_openapi import models as open_api_models
+    # 导入 Table Recognize (表格识别) 模型
     from alibabacloud_ocr_api20210707 import models as ocr_models
     ALIYUN_SDK_AVAILABLE = True
 except ImportError:
     ALIYUN_SDK_AVAILABLE = False
 
 # ==============================================================================
-# --- [核心功能] ---
+# --- [核心功能 V2: 表格识别] ---
 # ==============================================================================
 
-def get_aliyun_ocr(image: Image.Image) -> str:
+def get_aliyun_table_ocr(image: Image.Image) -> dict:
     """
-    操，调用阿里云OCR，不压缩图片
+    调用阿里云 【表格识别】 (RecognizeTable) API。
+    这个API会返回一个结构化的JSON，而不仅仅是纯文本。
     """
     if not ALIYUN_SDK_AVAILABLE:
-        st.error("操！你他妈的没装阿里云SDK (alibabacloud_ocr_api20210707)！")
+        st.error("错误：未找到阿里云SDK (alibabacloud_ocr_api20210707)！")
         return None
     
     if "aliyun_credentials" not in st.secrets:
-        st.error("操！没在 .streamlit/secrets.toml 里找到 [aliyun_credentials]！")
+        st.error("错误：未在 .streamlit/secrets.toml 中找到 [aliyun_credentials] 配置！")
         return None
     
     access_key_id = st.secrets.aliyun_credentials.get("access_key_id")
     access_key_secret = st.secrets.aliyun_credentials.get("access_key_secret")
 
     if not access_key_id or not access_key_secret:
-        st.error("操！你阿里云的 Key 或 Secret 没填对！")
+        st.error("错误：阿里云 AccessKeyId 或 AccessKeySecret 未配置！")
         return None
 
     try:
@@ -55,40 +57,43 @@ def get_aliyun_ocr(image: Image.Image) -> str:
         if image.mode == 'RGBA':
             image = image.convert('RGB')
         
-        # 操，不压缩，直接用原图
+        # 使用JPEG格式保存到内存
         image.save(buffered, format="JPEG")
         buffered.seek(0)
         
-        request = ocr_models.RecognizeGeneralRequest(body=buffered)
-        response = client.recognize_general(request)
+        # 1. 创建 RecognizeTableRequest
+        # 我们请求JSON格式的输出
+        request = ocr_models.RecognizeTableRequest(
+            body=buffered,
+            output_format="json"
+        )
+        
+        # 2. 调用 recognize_table 方法
+        st.write("正在调用阿里云【表格识别】API...")
+        response = client.recognize_table(request)
+        st.write("API 调用完成。")
 
         if response.status_code == 200 and response.body and response.body.data:
+            # 3. 解析返回的JSON数据
             data = json.loads(response.body.data)
-            return data.get('content', '')
+            return data
         else:
             error_message = '无详细信息'
             if response.body and hasattr(response.body, 'message'):
-               error_message = response.body.message
-            raise Exception(f"阿里云 OCR API 返回错误: {error_message}")
+                error_message = response.body.message
+            raise Exception(f"阿里云 表格识别 API 返回错误: {error_message}")
 
     except Exception as e:
-        st.error(f"操！调用阿里云 OCR API 失败: {e}")
+        st.error(f"调用阿里云 表格识别 API 失败: {e}")
         st.code(traceback.format_exc())
         return None
 
-def parse_ocr_to_dataframe(ocr_text: str, building_name: str) -> pd.DataFrame:
+def parse_table_ocr_to_dataframe(ocr_data: dict, building_name: str) -> pd.DataFrame:
     """
-    操，把阿里云返回的那坨狗屎一样的文本，硬塞进一个DataFrame里。
-    (V5：妈的，这回能处理 'xx.x%/yy.y%' 和 OCR 漏掉 '星期' 列的傻逼情况)
+    V2: 解析 RecognizeTable API 返回的结构化 JSON 数据并填充 DataFrame。
     """
     
-    def get_string_from_part(part):
-        """
-        操，就他妈的直接返回清理过的字符串
-        """
-        return part.strip()
-
-    # 妈的，先定义好表格结构
+    # 1. 准备一个空的默认DataFrame，结构和以前一样
     today = date.today()
     days = [(today + timedelta(days=i)) for i in range(7)]
     weekdays_zh_map = ["一", "二", "三", "四", "五", "六", "日"]
@@ -96,157 +101,158 @@ def parse_ocr_to_dataframe(ocr_text: str, building_name: str) -> pd.DataFrame:
     initial_data = {
         "日期": [d.strftime("%m/%d") for d in days],
         "星期": [weekdays_zh_map[d.weekday()] for d in days],
-        "当日预计 (%)": ["0.0"] * 7, # 操，改成字符串
-        "当日实际 (%)": ["0.0"] * 7, # 操，改成字符串
-        "周一预计 (%)": ["0.0"] * 7, # 操，改成字符串
-        "平均房价": ["0.0"] * 7      # 操，改成字符串
+        "当日预计 (%)": ["0.0"] * 7,
+        "当日实际 (%)": ["0.0"] * 7,
+        "周一预计 (%)": ["0.0"] * 7,
+        "平均房价": ["0.0"] * 7
     }
     df = pd.DataFrame(initial_data)
 
-    if not ocr_text:
-        return df # 操，空的文本还想让老子解析？
-
-    # 操，把所有文本行按楼名分开
-    lines = ocr_text.split('\n')
-    building_lines = []
-    found_building = False
-    
-    other_building = "亚太商务楼" if building_name == "金陵楼" else "金陵楼"
-    # 操，正则表达式，用来匹配像 "20/10" 或 "20-10" 这样的日期
-    date_regex = re.compile(r'\d{1,2}[/-]\d{1,2}') 
-
-    for line in lines:
-        line = line.strip() # 操，先去掉首尾的空格
-        if not line:
-            continue
-            
-        if building_name in line:
-            found_building = True
-        
-        # 操，如果碰到了另一个楼，就关开关，滚蛋
-        if other_building in line and building_name not in line:
-            found_building = False
-            break 
-        
-        if found_building:
-            # 操，检查这行有没有日期，有日期才算数据行
-            if date_regex.search(line):
-                building_lines.append(line)
-
-    if not building_lines:
-        st.warning(f"操，在OCR结果里没找到 '{building_name}' 的数据行。")
+    if not ocr_data or 'tables' not in ocr_data:
+        st.warning("OCR结果为空或未识别到'tables'结构。")
         return df
 
-    # 操，开始解析数据行
-    row_index = 0
-    for line in building_lines:
-        if row_index >= 7: # 表格只有7行，多了不要
+    # 2. 查找包含 building_name (例如 '金陵楼') 的表格
+    target_table = None
+    for table in ocr_data.get('tables', []):
+        for cell in table.get('cells', []):
+            if building_name in cell.get('text', ''):
+                target_table = table
+                break
+        if target_table:
             break
-        
-        parts = line.split()
-        data_parts = []
-        
-        for i, part in enumerate(parts):
-            if date_regex.search(part):
-                # 操！找到日期了！
-                if (i + 1) < len(parts):
-                    # 妈的，检查下一个是不是 "一", "二", "三" ...
-                    next_part = parts[i+1].strip()
-                    if next_part in weekdays_zh_map:
-                        # 操，是星期，数据从 i+2 开始
-                        if (i + 2) < len(parts):
-                            data_parts = parts[i+2:]
-                    else:
-                        # 操，不是星期，OCR把星期搞丢了，数据从 i+1 开始
-                        data_parts = parts[i+1:]
-                    break # 找到数据了，滚
-        
-        if not data_parts:
-            # st.warning(f"操，在行 '{line}' 里没找到数据，跳过。") # 操，这条警告太烦了
-            continue
 
-        # 操，按顺序填进去
-        # 假设 data_parts 顺序是：[预计, 实际, 增, 周一预计, 周一实际, 增百, 房价]
-        # (如果星期被跳过，就是这个顺序)
-        try:
-            if len(data_parts) >= 1:
-                df.at[row_index, "当日预计 (%)"] = get_string_from_part(data_parts[0])
-            if len(data_parts) >= 2:
-                df.at[row_index, "当日实际 (%)"] = get_string_from_part(data_parts[1])
-            # data_parts[2] (当日增加率) 跳过
-            if len(data_parts) >= 4: # 拿第4个
-                df.at[row_index, "周一预计 (%)"] = get_string_from_part(data_parts[3])
-            # data_parts[4] (周一实际), data_parts[5] (增加百分率) 跳过
-            if len(data_parts) >= 7: # 拿第7个
-                df.at[row_index, "平均房价"] = get_string_from_part(data_parts[6])
-        except Exception as e:
-            st.warning(f"操，解析行 '{line}' 出错了: {e}")
-            
-        row_index += 1
+    if not target_table:
+        st.warning(f"在OCR结果中未找到包含 '{building_name}' 的表格。")
+        return df
+
+    # 3. 找到表格后，解析数据行
+    # 假设表格结构是：[日期, 星期, 预计, 实际, 增, 周一预计, 周一实际, 增百, 房价]
+    # 对应的列索引(col_index)是: 0, 1, 2, 3, 4, 5, 6, 7, 8
+    
+    # 我们需要填充的列
+    COLUMN_MAPPING = {
+        2: "当日预计 (%)",  # 第3列表格
+        3: "当日实际 (%)",  # 第4列表格
+        5: "周一预计 (%)",  # 第6列表格
+        8: "平均房价"      # 第9列表格
+    }
+    
+    # 用于匹配数据行第一列 (日期) 的正则表达式
+    date_regex = re.compile(r'\d{1,2}[/-]\d{1,2}') 
+    
+    # 记录我们填充到了DataFrame的第几行
+    df_row_index = 0
+    
+    # 遍历表格的所有单元格
+    cells = sorted(target_table.get('cells', []), key=lambda c: (c['row_index'], c['col_index']))
+    
+    current_table_row = -1
+    
+    for cell in cells:
+        row_idx = cell['row_index']
+        col_idx = cell['col_index']
+        text = cell.get('text', '').strip()
+
+        # 这是一个新行
+        if row_idx != current_table_row:
+            current_table_row = row_idx
+            # 检查这是不是一个数据行 (通过检查第0列是否是日期)
+            if col_idx == 0 and date_regex.search(text):
+                # 这是一个数据行
+                pass
+            else:
+                # 这不是数据行 (可能是表头, 或者是 '金陵楼' 那一行), 跳过这一整行
+                current_table_row = -1 # 标记为无效，直到找到下一个日期行
+                continue
         
+        # 如果我们正在一个有效的数据行里
+        if current_table_row != -1:
+            if df_row_index >= 7:
+                break # DataFrame 已经填满了
+            
+            # 检查这个单元格是不是我们需要的列
+            if col_idx in COLUMN_MAPPING:
+                column_name = COLUMN_MAPPING[col_idx]
+                df.at[df_row_index, column_name] = text
+        
+        # 检查是否该换到DataFrame的下一行
+        # (假设 '平均房价' 是表格的最后一列，col_index 8)
+        if col_idx == 8 and current_table_row != -1:
+            df_row_index += 1
+
     return df
+
+# ==============================================================================
+# --- [核心功能 V1: 计算和Word生成] ---
+# (这部分代码和V1完全一样，因为它们只依赖DataFrame)
+# ==============================================================================
+
+def get_calc_value(value_str):
+    """
+    辅助函数：从 'xx.x%/yy.y%' 或 'xx.x' 字符串中提取用于计算的最后一个浮点数。
+    """
+    if isinstance(value_str, (int, float)):
+        return value_str
+    
+    target_str = str(value_str)
+    if '/' in target_str:
+        target_str = target_str.split('/')[-1] # 取 '/' 后的部分
+        
+    # 清理常见的非数字字符
+    target_str = target_str.replace('%', '').replace('i', '').strip()
+        
+    match = re.search(r'(\d+\.\d+)|(\d+)', target_str)
+    if match:
+        try:
+            return float(match.group(1) or match.group(2))
+        except (ValueError, TypeError):
+            return 0.0
+    return 0.0
 
 def calculate_rates(df_in):
     """
-    操，计算增加率和百分率。
-    (V2：妈的，这回从 'xx.x%/yy.y%' 这种字符串里抠最后一个数字来算)
+    使用提取的浮点数计算“当日增加率”和“增加百分率”。
     """
     df = df_in.copy()
     
-    def get_calc_value(value_str):
-        """操，从 'xx.x%/yy.y%' 里抠出 'yy.y' 来算"""
-        if isinstance(value_str, (int, float)):
-            return value_str # 操，万一已经是数字了
-        
-        target_str = str(value_str)
-        if '/' in target_str:
-            target_str = target_str.split('/')[-1] # 拿最后一个
-            
-        match = re.search(r'(\d+\.\d+)|(\d+)', target_str)
-        if match:
-            try:
-                return float(match.group(1) or match.group(2))
-            except (ValueError, TypeError):
-                return 0.0
-        return 0.0
-
     try:
-        # 操，先转成数字列
+        # 1. 提取用于计算的浮点数列
         calc_expected = df["当日预计 (%)"].apply(get_calc_value)
         calc_actual = df["当日实际 (%)"].apply(get_calc_value)
         calc_monday_expected = df["周一预计 (%)"].apply(get_calc_value)
         
-        # 操，开始算
+        # 2. 计算增加率
         df["当日增加率 (%)"] = calc_actual - calc_expected
         df["增加百分率 (%)"] = calc_actual - calc_monday_expected
         
-        # 操，把结果格式化成好看的字符串，带上正负号
+        # 3. 格式化为带正负号的字符串
         df["当日增加率 (%)"] = df["当日增加率 (%)"].apply(lambda x: f"{x:+.1f}%")
         df["增加百分率 (%)"] = df["增加百分率 (%)"].apply(lambda x: f"{x:+.1f}%")
         
-        # 操，计算本周总结
+        # 4. 计算本周总结
         actual_sum = calc_actual.sum()
         monday_sum = calc_monday_expected.sum()
-        actual_increase = actual_sum - calc_expected.sum() # 操，这个好像你原来就是这么算的
         
         summary = {
             "本周实际": f"{actual_sum:.1f}%",
-            "周一预测": f"{(monday_sum):.1f}%", # 你那个 54.3% + 31.2% = 85.5% 狗屁不通，老子直接求和
-            "实际增加": f"{(actual_sum - monday_sum):.1f}%" # 操，实际增加应该是这个
+            "周一预测": f"{monday_sum:.1f}%",
+            "实际增加": f"{(actual_sum - monday_sum):+.1f}%" # 使用带符号的格式
         }
         
         return df, summary
     except Exception as e:
-        st.error(f"操，计算的时候出错了: {e}")
+        st.error(f"计算比率时出错: {e}")
+        st.code(traceback.format_exc())
         return df_in, {} # 返回原始表和空总结
 
 def create_word_doc(jl_df, yt_df, jl_summary, yt_summary):
     """
-    操，把这两个傻逼表格塞进一个Word文档里
+    将两个DataFrame和它们的总结数据生成一个Word文档。
     """
     try:
         doc = Document()
-        # 操，设置中文字体
+        # 设置中文字体
         doc.styles['Normal'].font.name = u'宋体'
         doc.styles['Normal']._element.rPr.rFonts.set(qn('w:eastAsia'), u'宋体')
         doc.styles['Normal'].font.size = Pt(10)
@@ -255,67 +261,73 @@ def create_word_doc(jl_df, yt_df, jl_summary, yt_summary):
         doc.add_heading("每日出租率对照表", level=1).alignment = WD_ALIGN_PARAGRAPH.CENTER
         doc.add_paragraph("金陵楼", style='Subtitle').alignment = WD_ALIGN_PARAGRAPH.LEFT
         
-        # 操，创建表格
-        table_jl = doc.add_table(rows=jl_df.shape[0] + 1, cols=jl_df.shape[1])
+        # 调整列顺序以匹配原始表格
+        jl_cols_ordered = ["日期", "星期", "当日预计 (%)", "当日实际 (%)", "当日增加率 (%)", "周一预计 (%)", "增加百分率 (%)", "平均房价"]
+        jl_df_ordered = jl_df[jl_cols_ordered]
+
+        table_jl = doc.add_table(rows=jl_df_ordered.shape[0] + 1, cols=jl_df_ordered.shape[1])
         table_jl.style = 'Table Grid'
         
-        # 操，写表头
+        # 写表头
         hdr_cells_jl = table_jl.rows[0].cells
-        for i, col_name in enumerate(jl_df.columns):
+        for i, col_name in enumerate(jl_df_ordered.columns):
             hdr_cells_jl[i].text = col_name
             hdr_cells_jl[i].paragraphs[0].runs[0].font.bold = True
 
-        # 操，写数据
-        for index, row in jl_df.iterrows():
+        # 写数据
+        for index, row in jl_df_ordered.iterrows():
             row_cells = table_jl.rows[index + 1].cells
-            for i, col_name in enumerate(jl_df.columns):
-                row_cells[i].text = str(row[col_name]) # 操，都转成字符串
+            for i, col_name in enumerate(jl_df_ordered.columns):
+                row_cells[i].text = str(row[col_name])
         
-        # 操，写金陵楼总结
+        # 写金陵楼总结
         doc.add_paragraph(
-            f"本周实际： {jl_summary.get('本周实际', 'N/A')}    "
-            f"周一预测： {jl_summary.get('周一预测', 'N/A')}    "
+            f"本周实际： {jl_summary.get('本周实际', 'N/A')}     "
+            f"周一预测： {jl_summary.get('周一预测', 'N/A')}     "
             f"实际增加： {jl_summary.get('实际增加', 'N/A')}"
         )
 
         # --- 亚太商务楼 ---
         doc.add_paragraph("亚太商务楼", style='Subtitle').alignment = WD_ALIGN_PARAGRAPH.LEFT
         
-        table_yt = doc.add_table(rows=yt_df.shape[0] + 1, cols=yt_df.shape[1])
+        yt_cols_ordered = ["日期", "星期", "当日预计 (%)", "当日实际 (%)", "当日增加率 (%)", "周一预计 (%)", "增加百分率 (%)", "平均房价"]
+        yt_df_ordered = yt_df[yt_cols_ordered]
+
+        table_yt = doc.add_table(rows=yt_df_ordered.shape[0] + 1, cols=yt_df_ordered.shape[1])
         table_yt.style = 'Table Grid'
         
         hdr_cells_yt = table_yt.rows[0].cells
-        for i, col_name in enumerate(yt_df.columns):
+        for i, col_name in enumerate(yt_df_ordered.columns):
             hdr_cells_yt[i].text = col_name
             hdr_cells_yt[i].paragraphs[0].runs[0].font.bold = True
 
-        for index, row in yt_df.iterrows():
+        for index, row in yt_df_ordered.iterrows():
             row_cells = table_yt.rows[index + 1].cells
-            for i, col_name in enumerate(yt_df.columns):
+            for i, col_name in enumerate(yt_df_ordered.columns):
                 row_cells[i].text = str(row[col_name])
         
         doc.add_paragraph(
-            f"本周实际： {yt_summary.get('本周实际', 'N/A')}    "
-            f"周一预测： {yt_summary.get('周一预测', 'N/A')}    "
+            f"本周实际： {yt_summary.get('本周实际', 'N/A')}     "
+            f"周一预测： {yt_summary.get('周一预测', 'N/A')}     "
             f"实际增加： {yt_summary.get('实际增加', 'N/A')}"
         )
 
-        # 操，设置列宽 (大概齐)
+        # 设置列宽
+        widths = [Inches(0.6), Inches(0.5), Inches(0.8), Inches(1.0), Inches(0.8), Inches(0.8), Inches(0.8), Inches(0.8)]
         for table in [table_jl, table_yt]:
-            widths = [Inches(0.6), Inches(0.5), Inches(0.8), Inches(1.0), Inches(0.8), Inches(0.8), Inches(0.8), Inches(0.8)] # 操，把“当日实际”那列加宽了
             for i, width in enumerate(widths):
                 if i < len(table.columns):
                     for cell in table.columns[i].cells:
                         cell.width = width
         
-        # 操，存到内存里
+        # 存到内存
         f = io.BytesIO()
         doc.save(f)
         f.seek(0)
         return f.getvalue()
 
     except Exception as e:
-        st.error(f"操，生成Word的时候出错了: {e}")
+        st.error(f"生成Word文档时出错: {e}")
         st.code(traceback.format_exc())
         return None
 
@@ -323,70 +335,71 @@ def create_word_doc(jl_df, yt_df, jl_summary, yt_summary):
 # --- [Streamlit 界面] ---
 # ==============================================================================
 def run_ocr_calculator_app():
-    st.title(f"操，OCR出租率计算器")
-    st.markdown("1. 上传你那张手写的破纸照片。")
-    st.markdown("2. 老子用**阿里云**帮你识别，把数字填进下面的表里。")
-    st.markdown("3. 你他妈的自己**人工核对**，把识别错的傻逼数字改过来。")
-    st.markdown("4. 点下面的按钮，老子给你**重新计算**，还能下载成Word。")
+    st.title("OCR出租率计算器 (V2 - 表格识别版)")
+    st.markdown("1. 上传手写表格的照片。")
+    st.markdown("2. 使用**阿里云表格识别API**，智能解析表格并填充。")
+    st.markdown("3. **人工核对**下方的可编辑表格，修正识别错误的数字。")
+    st.markdown("4. 点击“计算”按钮，生成最终报表并下载Word文档。")
 
-    uploaded_file = st.file_uploader("上传图片文件", type=["png", "jpg", "jpeg", "bmp"], key="ocr_calc_uploader")
+    uploaded_file = st.file_uploader("上传图片文件", type=["png", "jpg", "jpeg", "bmp"], key="ocr_calc_uploader_v2")
 
     if uploaded_file:
         image = Image.open(uploaded_file)
-        st.image(image, caption="你传的破纸", width=300)
+        st.image(image, caption="上传的图片", width=300)
 
-        if st.button("操，开始识别！", type="primary"):
-            with st.spinner('操，正在调用阿里云玩命识别...'):
-                ocr_text = get_aliyun_ocr(image)
-                if ocr_text:
-                    st.session_state.ocr_text = ocr_text
-                    st.info("操，老子正在试着把原文填进表里...")
-                    st.session_state.jl_df = parse_ocr_to_dataframe(ocr_text, "金陵楼")
-                    st.session_state.yt_df = parse_ocr_to_dataframe(ocr_text, "亚太商务楼")
-                    st.success("操，填完了！你自己检查下，不对的给老子改过来！")
+        if st.button("开始识别 (表格模式)", type="primary"):
+            with st.spinner('正在调用阿里云【表格识别】API...'):
+                ocr_data = get_aliyun_table_ocr(image)
+                
+                if ocr_data:
+                    st.session_state.ocr_data = ocr_data
+                    st.info("API调用成功，正在解析返回的表格JSON...")
+                    st.session_state.jl_df = parse_table_ocr_to_dataframe(ocr_data, "金陵楼")
+                    st.session_state.yt_df = parse_table_ocr_to_dataframe(ocr_data, "亚太商务楼")
+                    st.success("解析完成！请检查下面的表格，手动修正错误。")
                     
-                    with st.expander("点开看OCR识别的狗屎原文"):
-                        st.text_area("OCR结果", ocr_text, height=200)
+                    with st.expander("查看阿里云返回的原始JSON数据"):
+                        st.json(ocr_data)
                 else:
-                    st.error("操，阿里云那个傻逼没返回东西。")
-                    st.session_state.jl_df = parse_ocr_to_dataframe("", "金陵楼") # 生成空表
-                    st.session_state.yt_df = parse_ocr_to_dataframe("", "亚太商务楼")
+                    st.error("表格识别API未返回有效数据。")
+                    st.session_state.jl_df = parse_table_ocr_to_dataframe(None, "金陵楼") # 生成空表
+                    st.session_state.yt_df = parse_table_ocr_to_dataframe(None, "亚太商务楼")
     
     # --- 表格编辑区 ---
     if 'jl_df' in st.session_state:
         st.divider()
-        st.subheader("金陵楼 (操，在这里改数字)")
+        st.subheader("金陵楼 (请在此处编辑)")
         st.session_state.jl_df_edited = st.data_editor(
             st.session_state.jl_df,
             column_config={
                 "当日预计 (%)": st.column_config.TextColumn(label="当日预计 (%)", width="small"),
-                "当日实际 (%)": st.column_config.TextColumn(label="当日实际 (%)", width="medium"), # 操，把这列加宽
+                "当日实际 (%)": st.column_config.TextColumn(label="当日实际 (%)", width="medium"),
                 "周一预计 (%)": st.column_config.TextColumn(label="周一预计 (%)", width="small"),
                 "平均房价": st.column_config.TextColumn(label="平均房价", width="small"),
                 "日期": st.column_config.TextColumn(label="日期", disabled=True),
                 "星期": st.column_config.TextColumn(label="星期", disabled=True),
             },
             num_rows="fixed",
-            key="editor_jl"
+            key="editor_jl_v2"
         )
         
-        st.subheader("亚太商务楼 (操，在这里改数字)")
+        st.subheader("亚太商务楼 (请在此处编辑)")
         st.session_state.yt_df_edited = st.data_editor(
             st.session_state.yt_df,
             column_config={
                 "当日预计 (%)": st.column_config.TextColumn(label="当日预计 (%)", width="small"),
-                "当日实际 (%)": st.column_config.TextColumn(label="当日实际 (%)", width="medium"), # 操，把这列加宽
+                "当日实际 (%)": st.column_config.TextColumn(label="当日实际 (%)", width="medium"),
                 "周一预计 (%)": st.column_config.TextColumn(label="周一预计 (%)", width="small"),
                 "平均房价": st.column_config.TextColumn(label="平均房价", width="small"),
                 "日期": st.column_config.TextColumn(label="日期", disabled=True),
                 "星期": st.column_config.TextColumn(label="星期", disabled=True),
             },
             num_rows="fixed",
-            key="editor_yt"
+            key="editor_yt_v2"
         )
 
-        if st.button("操，改完了，给老子算！", type="primary"):
-            # 操，用改过的表来算
+        if st.button("重新计算最终结果", type="primary"):
+            # 使用编辑后的数据进行计算
             jl_df_final, jl_summary = calculate_rates(st.session_state.jl_df_edited)
             yt_df_final, yt_summary = calculate_rates(st.session_state.yt_df_edited)
             
@@ -396,16 +409,20 @@ def run_ocr_calculator_app():
             st.session_state.yt_summary = yt_summary
             
             st.balloons()
-            st.success("操，算完了！看下面的最终结果！")
+            st.success("计算完成！")
 
     # --- 最终结果展示 ---
     if 'jl_df_final' in st.session_state:
         st.divider()
         st.subheader("最终结果 (金陵楼)")
-        # 操，展示最终算好的表
+        
+        # 辅助函数，用于安全格式化
+        def format_price(x):
+            val = get_calc_value(x)
+            return f"{val:.2f}" if val is not None else "0.00"
+
         st.dataframe(st.session_state.jl_df_final.style.format({
-             # 妈的，平均房价给你搞成2位小数
-            "平均房价": lambda x: f"{get_calc_value(x):.2f}" 
+           "平均房价": format_price
         }))
         st.markdown(
             f"**本周实际：** `{st.session_state.jl_summary.get('本周实际', 'N/A')}` | "
@@ -415,7 +432,7 @@ def run_ocr_calculator_app():
         
         st.subheader("最终结果 (亚太商务楼)")
         st.dataframe(st.session_state.yt_df_final.style.format({
-            "平均房价": lambda x: f"{get_calc_value(x):.2f}"
+            "平均房价": format_price
         }))
         st.markdown(
             f"**本周实际：** `{st.session_state.yt_summary.get('本周实际', 'N/A')}` | "
@@ -423,7 +440,7 @@ def run_ocr_calculator_app():
             f"**实际增加：** `{st.session_state.yt_summary.get('实际增加', 'N/A')}`"
         )
         
-        # 操，生成Word
+        # 生成Word
         doc_data = create_word_doc(
             st.session_state.jl_df_final, 
             st.session_state.yt_df_final, 
@@ -433,9 +450,14 @@ def run_ocr_calculator_app():
         
         if doc_data:
             st.download_button(
-                label="操，下载Word文档",
+                label="下载Word文档",
                 data=doc_data,
-                file_name="每日出租率对照表.docx",
+                file_name="每日出租率对照表_V2.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
 
+# --- 主程序入口 ---
+if __name__ == "__main__":
+    # 设置页面标题
+    st.set_page_config(page_title="OCR出租率计算器 V2")
+    run_ocr_calculator_app()
