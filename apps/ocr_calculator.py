@@ -89,7 +89,7 @@ def get_aliyun_table_ocr(image: Image.Image) -> dict:
 
 def parse_table_ocr_to_dataframe(ocr_data: dict, building_name: str) -> pd.DataFrame:
     """
-    V2: 解析 RecognizeTable API 返回的结构化 JSON 数据并填充 DataFrame。
+    V2.3: 重写解析逻辑，以适应 'prism_tablesInfo' 和 'prism_wordsInfo' 的JSON结构
     """
     
     # 1. 准备一个空的默认DataFrame，结构和以前一样
@@ -107,29 +107,39 @@ def parse_table_ocr_to_dataframe(ocr_data: dict, building_name: str) -> pd.DataF
     }
     df = pd.DataFrame(initial_data)
 
-    if not ocr_data or 'tables' not in ocr_data:
-        st.warning("OCR结果为空或未识别到'tables'结构。")
+    # --- (*** V2.3 修复开始 ***) ---
+    # 检查新的、正确的JSON键
+    if not ocr_data or 'prism_tablesInfo' not in ocr_data:
+        st.warning("OCR结果为空或未识别到'prism_tablesInfo'结构。")
         return df
+    if 'prism_wordsInfo' not in ocr_data:
+        st.warning("OCR结果为空或未识别到'prism_wordsInfo'结构。")
+        return df
+
+    all_words = ocr_data.get('prism_wordsInfo', [])
+    all_tables = ocr_data.get('prism_tablesInfo', [])
 
     # 2. 查找包含 building_name (例如 '金陵楼') 的表格
     target_table = None
-    for table in ocr_data.get('tables', []):
-        for cell in table.get('cells', []):
-            if building_name in cell.get('text', ''):
+    for table in all_tables:
+        # 遍历表格的单元格
+        for cell in table.get('cellInfos', []):
+            # 从 all_words 列表中拼接单元格文本
+            word_ids = cell.get('word_ids', [])
+            cell_text = "".join([all_words[i]['word'] for i in word_ids if i < len(all_words)])
+            
+            if building_name in cell_text:
                 target_table = table
                 break
         if target_table:
             break
+    # --- (*** V2.3 修复结束 ***) ---
 
     if not target_table:
         st.warning(f"在OCR结果中未找到包含 '{building_name}' 的表格。")
         return df
 
     # 3. 找到表格后，解析数据行
-    # 假设表格结构是：[日期, 星期, 预计, 实际, 增, 周一预计, 周一实际, 增百, 房价]
-    # 对应的列索引(col_index)是: 0, 1, 2, 3, 4, 5, 6, 7, 8
-    
-    # 我们需要填充的列
     COLUMN_MAPPING = {
         2: "当日预计 (%)",  # 第3列表格
         3: "当日实际 (%)",  # 第4列表格
@@ -137,21 +147,25 @@ def parse_table_ocr_to_dataframe(ocr_data: dict, building_name: str) -> pd.DataF
         8: "平均房价"      # 第9列表格
     }
     
-    # 用于匹配数据行第一列 (日期) 的正则表达式
     date_regex = re.compile(r'\d{1,2}[/-]\d{1,2}') 
-    
-    # 记录我们填充到了DataFrame的第几行
     df_row_index = 0
     
-    # 遍历表格的所有单元格
-    cells = sorted(target_table.get('cells', []), key=lambda c: (c['row_index'], c['col_index']))
+    # --- (*** V2.3 修复开始 ***) ---
+    # 遍历表格的所有单元格, 按行(y)和列(x)排序
+    cells = sorted(target_table.get('cellInfos', []), key=lambda c: (c['y'], c['x']))
+    # --- (*** V2.3 修复结束 ***) ---
     
     current_table_row = -1
     
     for cell in cells:
-        row_idx = cell['row_index']
-        col_idx = cell['col_index']
-        text = cell.get('text', '').strip()
+        # --- (*** V2.3 修复开始 ***) ---
+        row_idx = cell['y'] # 'y' 是行索引
+        col_idx = cell['x'] # 'x' 是列索引
+        
+        # 从 all_words 列表中拼接单元格文本
+        word_ids = cell.get('word_ids', [])
+        text = "".join([all_words[i]['word'] for i in word_ids if i < len(all_words)]).strip()
+        # --- (*** V2.3 修复结束 ***) ---
 
         # 这是一个新行
         if row_idx != current_table_row:
@@ -253,7 +267,7 @@ def create_word_doc(jl_df, yt_df, jl_summary, yt_summary):
         doc = Document()
         # 设置中文字体
         doc.styles['Normal'].font.name = u'宋体'
-        doc.styles['Normal']._element.rPr.rFonts.set(qn('w:eastAsia'), u'宋Т' )
+        doc.styles['Normal']._element.rPr.rFonts.set(qn('w:eastAsia'), u'宋体' )
         doc.styles['Normal'].font.size = Pt(10)
         
         # --- 金陵楼 ---
