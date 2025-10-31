@@ -1,210 +1,197 @@
 import streamlit as st
 import pandas as pd
 import re
-import fitz  # PyMuPDF
-import email
+import fitz  # 操, PyMuPDF
 import io
+import base64
+import email # 操, 用来读 .eml
 from email.policy import default
-from config import CTRIP_PDF_SYSTEM_COLUMN_MAP # 操，从config导入列名
-from utils import find_and_rename_columns, to_excel # 操，导入公用函数
+from config import CTRIP_PDF_SYSTEM_COLUMN_MAP # 操, 导入配置
+from utils import find_and_rename_columns, to_excel # 操, 导入公用函数
 
-def extract_pdf_data(pdf_file):
+def parse_pdf_text(pdf_bytes):
     """
-    操，从PDF文件里把订单号和结算价给老子抠出来。
+    操, 这个函数专门从PDF的二进制数据里把订单号和价格抠出来。
+    新逻辑：会把所有订单和价格都扒下来，然后按订单号分组求和，抵消掉那些一正一负的傻逼订单。
     """
-    pdf_data = []
+    text = ""
     try:
-        # 打开PDF文件
-        pdf_doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
-        
-        # 妈的，一页一页地读
+        # 操, 打开PDF
+        pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         for page_num in range(len(pdf_doc)):
             page = pdf_doc.load_page(page_num)
-            text = page.get_text("text")
-            
-            # 操，用正则表达式找订单号和结算价
-            # 假设订单号是 "订单号：CT" 开头的一串数字
-            # 假设结算是 "结算价：CNY" 开头的一串数字(可能带小数点)
-            
-            # 妈的，这PDF是图片转的还是文本的？先按文本试试
-            # (注意：这里的正则表达式是你妈的猜的，如果PDF格式不一样，就得改)
-            
-            # 先简单点，一行一行找
-            lines = text.split('\n')
-            order_no = None
-            price = None
-            
-            # 操，这PDF里的格式太他妈的乱了，只能猜
-            # 咱们就找 "订单号" 和 "结算价" 附近的数字
-            
-            # 找订单号 (假设是10位以上的数字)
-            order_matches = re.findall(r'(\d{10,})', text)
-            # 找结算价 (假设是带小数点的数字)
-            price_matches = re.findall(r'(\d+\.\d{2})', text)
-
-            # 操，这种简单的正则肯定不准，但你没给PDF内容，老子只能先这么写
-            # 假设第一个长数字是订单号，第一个带小数的是价格
-            
-            # 妈的，换个思路，你给的邮件附件名是"携程商旅酒店对账单"
-            # 这种对账单一般是表格，老子按表格来试试
-            
-            # 假设PDF文本里有 "订单号" 和 "结算价" 这两个词
-            # 我们找这两列下面的数据
-            
-            # (这只是个示例，真实的PDF解析比这复杂一万倍)
-            # 妈的，先用个更健壮的正则，找 "订单号" 后面跟着的数字
-            order_no_matches = re.findall(r'[订单号|Order No][：:\s]*(\d+)', text, re.IGNORECASE)
-            price_matches = re.findall(r'[结算价|Price][：:\s]*CNY\s*([\d,\.]+)', text, re.IGNORECASE)
-
-            st.write(f"--- 调试：第 {page_num+1} 页找到的文本 ---")
-            st.text(text[:1000] + "...") # 妈的，打点日志看看
-            st.write(f"找到的订单号: {order_no_matches}")
-            st.write(f"找到的价格: {price_matches}")
-
-            # 操，这里假设订单号和价格是一一对应的
-            # 真实的PDF可能根本不是这样，但先这么干
-            if order_no_matches and price_matches:
-                min_len = min(len(order_no_matches), len(price_matches))
-                for i in range(min_len):
-                    order_no = order_no_matches[i].strip()
-                    price_str = price_matches[i].replace(',', '').strip()
-                    try:
-                        price = float(price_str)
-                        pdf_data.append({'订单号': order_no, '结算价': price})
-                    except ValueError:
-                        st.warning(f"操，在PDF里找到个价格，但转换失败了: {price_str}")
-
-        if not pdf_data:
-            st.error("操，读了半天PDF，啥他妈的都没读出来！可能是PDF格式太奇葩，老子不认识。")
-            
-        return pd.DataFrame(pdf_data)
-
+            # 操，把所有换行替换成空格，对付那些傻逼换行
+            text += page.get_text("text").replace('\n', ' ') + " "
+        pdf_doc.close()
     except Exception as e:
-        st.error(f"操，读PDF的时候炸了: {e}")
-        st.error(traceback.format_exc())
-        return pd.DataFrame()
+        return f"操，PyMuPDF库在读取PDF时出错了: {e}"
+
+    if not text:
+        return "操，PDF是空的或者读不出来字。"
+
+    st.text_area("--- 调试：从PDF读出的原始文本 (已替换换行) ---", text, height=150)
+
+    # 操，新版正则表达式：
+    # (\d{16})     : 专门抓16位数字的订单号 (你说的)
+    # \s(.*?)\s      : 抓中间所有的垃圾信息，非贪婪模式
+    # (-?\d+\.\d{2}) : 抓带正负号和小数点的结算价
+    # 妈的，携程有时候订单号和入住者之间没空格，老子把中间的 \s 改成 (.*?)
+    matches = re.findall(r"(\d{16})(.*?)\s(-?\d+\.\d{2})", text)
+
+    if not matches:
+        st.warning("操，在PDF里没找到 '16位订单号 ... 价格' 这种格式的数据。")
+        # 操，尝试只抓订单号，万一价格匹配不上呢
+        order_ids_only = re.findall(r"(\d{16})", text)
+        st.info(f"只抓到这些16位订单号 (没抓到价格): {list(set(order_ids_only))}")
+        return pd.DataFrame(columns=['订单号', '结算价']) # 返回个空的DataFrame
+
+    # 操，把抓到的数据放进DataFrame
+    pdf_data = pd.DataFrame(matches, columns=['订单号', '详情', '结算价_str'])
+    
+    # 操，把价格转成数字，转不了的都算0
+    pdf_data['结算价'] = pd.to_numeric(pdf_data['结算价_str'], errors='coerce').fillna(0)
+    
+    st.info("--- 调试：从PDF扒下来的原始订单和价格 ---")
+    st.dataframe(pdf_data[['订单号', '结算价']], use_container_width=True)
+    
+    # --- 核心逻辑：分组求和 ---
+    st.info("--- 开始对账：按订单号聚合结算价 (正负抵消) ---")
+    # 操，按订单号分组，把结算价加起来
+    aggregated_df = pdf_data.groupby('订单号')['结算价'].sum().reset_index()
+    
+    # 操，只保留那些最后结算价不是0的订单
+    final_pdf_df = aggregated_df[aggregated_df['结算价'] != 0].copy()
+    
+    st.success("--- 聚合完成！下面是结算价不为0的最终订单 ---")
+    st.dataframe(final_pdf_df, use_container_width=True)
+    
+    return final_pdf_df
+
 
 def run_ctrip_pdf_checker_app():
     """
-    操，这个就是新加的携程PDF审单工具的界面
+    操，这是“携程PDF审单”的主程序
     """
-    st.title("携程PDF商旅对账单审核")
+    st.title(f"携程PDF审单 (邮件套PDF)")
     st.markdown("""
-    操，这玩意儿是用来干这个的：
-    1.  把携程发的那个带PDF附件的 **`.eml` 邮件**拖上来。
-    2.  把你那个傻逼**系统订单Excel**也拖上来。
-    3.  老子会从邮件里把PDF扒出来，再从PDF里把`订单号`和`结算价`抠出来。
-    4.  然后用PDF里的`订单号`去匹配你系统Excel里的`第三方预订号`。
-    5.  最后给你生成一个包含`姓名`, `房类`, `到达`, `离开`, `预订号`, `结算价(PDF的)`, `第三方预订号`的新Excel。
+    操，这个工具是专门对付携程那个傻逼`.eml`邮件里藏着`.pdf`附件的对账单的。
+    1.  上传包含PDF附件的 `.eml` 邮件文件。
+    2.  上传你从系统导出的订单Excel (xlsx)。
+    3.  老子会从PDF里把**16位订单号**和**结算价**抠出来，**自动抵消正负订单**，然后去Excel里找匹配的**第三方预订号**。
+    4.  最后给你一份干净的对账Excel。
     """)
-    
+
     col1, col2 = st.columns(2)
     with col1:
-        eml_files = st.file_uploader("上传 .eml 邮件文件 (可多选)", type=["eml"], accept_multiple_files=True)
+        eml_file = st.file_uploader("1. 上传 `.eml` 邮件文件", type=["eml"])
     with col2:
-        system_excel = st.file_uploader("上传系统订单 Excel 文件", type=["xlsx"])
+        system_excel = st.file_uploader("2. 上传系统订单 Excel (.xlsx)", type=["xlsx"])
 
-    if st.button("开始对账", type="primary", disabled=(not eml_files or not system_excel)):
-        pdf_data_list = []
+    if st.button("开始对账", type="primary", disabled=(not eml_file or not system_excel)):
+        pdf_df_list = []
         
-        with st.spinner("操，正在扒邮件里的PDF..."):
-            for eml_file in eml_files:
-                try:
-                    msg = email.message_from_bytes(eml_file.read(), policy=default)
-                    for part in msg.walk():
-                        if part.get_content_type() == "application/pdf":
-                            filename = part.get_filename()
-                            st.write(f"找到一个PDF: {filename}")
-                            pdf_content = part.get_payload(decode=True)
-                            pdf_file_like = io.BytesIO(pdf_content)
-                            df_pdf = extract_pdf_data(pdf_file_like)
-                            if not df_pdf.empty:
-                                pdf_data_list.append(df_pdf)
-                except Exception as e:
-                    st.error(f"操，处理邮件 {eml_file.name} 的时候出错了: {e}")
-        
-        if not pdf_data_list:
-            st.error("操，你传的邮件里一个能读的PDF都没找到！")
-            st.stop()
+        try:
+            # 操，读 .eml 文件
+            msg = email.message_from_bytes(eml_file.getvalue(), policy=default)
             
-        df_pdf_all = pd.concat(pdf_data_list).drop_duplicates().reset_index(drop=True)
-        st.subheader("从PDF里抠出来的原始数据：")
-        st.dataframe(df_pdf_all)
-
-        with st.spinner("操，正在读取你那个傻逼系统Excel..."):
-            try:
-                # 妈的，读Excel，把第三方预订号强制当成字符串
-                df_system = pd.read_excel(system_excel, dtype={'第三方预订号': str, '预订号': str})
-                df_system.columns = [col.strip() for col in df_system.columns]
-                
-                # 动态找列名
-                missing_cols = find_and_rename_columns(df_system, CTRIP_PDF_SYSTEM_COLUMN_MAP)
-                if missing_cols:
-                    st.error(f"操，你那个系统Excel里少了这几列: {', '.join(missing_cols)}")
-                    st.stop()
-                
-                # 把第三方预订号也转成字符串，准备匹配
-                if '第三方预订号' in df_system.columns:
-                    df_system['第三方预订号'] = df_system['第三方预订号'].astype(str).str.strip()
-                else:
-                    st.error("操，系统Excel里没找到'第三方预订号'列，没法匹配！")
-                    st.stop()
-
-                # 把PDF里的订单号也转成字符串
-                df_pdf_all['订单号'] = df_pdf_all['订单号'].astype(str).str.strip()
-
-            except Exception as e:
-                st.error(f"操，读你那个Excel的时候炸了: {e}")
+            found_pdf = False
+            for part in msg.walk():
+                if part.get_content_type() == "application/pdf":
+                    found_pdf = True
+                    pdf_name = part.get_filename() or "未命名.pdf"
+                    st.success(f"找到一个PDF: {pdf_name}")
+                    
+                    # 操，获取PDF的二进制内容
+                    pdf_bytes = part.get_payload(decode=True)
+                    
+                    # 操，调用新函数解析PDF
+                    with st.spinner(f"正在读取 '{pdf_name}' 里的数据..."):
+                        result_df = parse_pdf_text(io.BytesIO(pdf_bytes))
+                        
+                        if isinstance(result_df, str):
+                            st.error(result_df) # 操，出错了
+                        elif result_df.empty:
+                            st.warning(f"'{pdf_name}' 里没找到有效的、结算价不为0的订单。")
+                        else:
+                            pdf_df_list.append(result_df)
+            
+            if not found_pdf:
+                st.error("操，你传的邮件里一个PDF附件都没找到！")
                 st.stop()
+        
+        except Exception as e:
+            st.error(f"操，读取 .eml 文件时出错了: {e}")
+            st.stop()
+    
+        if not pdf_df_list:
+            st.error("操，所有PDF都读完了，但没找到任何有效的订单数据。")
+            st.stop()
+        
+        # 操，把所有PDF里读出来的数据合并到一起
+        all_pdf_data = pd.concat(pdf_df_list).drop_duplicates(subset=['订单号']).reset_index(drop=True)
+        
+        # --- 开始处理系统Excel ---
+        try:
+            with st.spinner("正在读取系统Excel..."):
+                system_df = pd.read_excel(system_excel, dtype=str) # 操，全当成文本读
+                system_df.columns = system_df.columns.str.strip() # 操，去他妈的空格
+            
+            # 操，动态查找并重命名列
+            missing_cols = find_and_rename_columns(system_df, CTRIP_PDF_SYSTEM_COLUMN_MAP)
+            if missing_cols:
+                st.error(f"操，你的系统Excel文件里少了这些列: {', '.join(missing_cols)}")
+                st.stop()
+            
+            # 操，只保留需要的列
+            required_system_cols = list(CTRIP_PDF_SYSTEM_COLUMN_MAP.keys())
+            system_df = system_df[required_system_cols]
+            
+        except Exception as e:
+            st.error(f"操，读取系统Excel时出错了: {e}")
+            st.stop()
 
-        with st.spinner("操，正在玩命匹配中..."):
-            # 妈的，用PDF的'订单号'去匹配系统的'第三方预订号'
+        # --- 核心匹配逻辑 ---
+        with st.spinner("正在用PDF数据匹配系统订单..."):
+            # 操，用PDF的'订单号' 匹配 系统的'第三方预订号'
             merged_df = pd.merge(
-                df_pdf_all,
-                df_system,
-                left_on='订单号',
-                right_on='第三方预订号',
-                how='left'
+                system_df,
+                all_pdf_data,
+                left_on='第三方预订号',
+                right_on='订单号'
             )
-            
-            # 把没匹配上的单独拎出来
-            matched_df = merged_df[merged_df['姓名'].notna()]
-            unmatched_df = merged_df[merged_df['姓名'].isna()]
+        
+        if merged_df.empty:
+            st.warning("操，PDF里的订单号一个都没在你系统Excel的'第三方预订号'里找到。")
+            st.subheader("--- PDF里的订单号 (聚合后结算价不为0) ---")
+            st.dataframe(all_pdf_data)
+            st.subheader("--- 系统Excel里的第三方预订号 (前100个) ---")
+            st.dataframe(system_df[['第三方预订号', '姓名']].head(100))
+            st.stop()
+        
+        st.success(f"操，牛逼！成功匹配上 {len(merged_df)} 条订单！")
 
-            st.success(f"操，搞定了！总共 {len(df_pdf_all)} 条PDF记录，匹配上 {len(matched_df)} 条，没匹配上 {len(unmatched_df)} 条。")
+        # 操，按你说的列名和顺序准备结果
+        final_output_df = merged_df[[
+            '姓名',
+            '房类',
+            '到达',
+            '离开',
+            '预订号',
+            '结算价',  # 操，这个就是PDF里来的
+            '第三方预订号'
+        ]]
+        
+        # 操，重命名一下结算价，免得你搞混
+        final_output_df = final_output_df.rename(columns={'结算价': '结算价(来自PDF)'})
 
-            # 按你说的，整理最后输出的列
-            output_columns = [
-                '姓名', 
-                '房类', 
-                '到达', 
-                '离开', 
-                '预订号', 
-                '结算价',  # 妈的，这个是PDF里的
-                '第三方预订号' # 妈的，这个是系统里的，应该和PDF订单号一样
-            ]
-            
-            # 确保这些列都存在
-            final_columns = [col for col in output_columns if col in matched_df.columns]
-            final_df = matched_df[final_columns].copy()
+        st.dataframe(final_output_df, use_container_width=True)
 
-            st.subheader("匹配上的结果：")
-            st.dataframe(final_df)
-            
-            if not unmatched_df.empty:
-                st.subheader("操，下面这些PDF里的订单号在你系统Excel里没找到：")
-                st.dataframe(unmatched_df[['订单号', '结算价']])
-
-            # 准备下载
-            excel_data = to_excel({
-                '匹配上的订单': final_df,
-                '没匹配上的PDF订单': unmatched_df[['订单号', '结算价']]
-            })
-            
-            st.download_button(
-                label="📥 下载对账结果Excel",
-                data=excel_data,
-                file_name="携程PDF对账结果.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+        # 操，准备下载
+        excel_data = to_excel({"携程PDF对账结果": final_output_df})
+        st.download_button(
+            label="📥 下载对账结果Excel",
+            data=excel_data,
+            file_name="ctrip_pdf_audit_result.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
