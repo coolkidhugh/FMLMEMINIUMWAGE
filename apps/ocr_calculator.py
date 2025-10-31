@@ -3,6 +3,7 @@ import pandas as pd
 import re
 import io
 import traceback # 操，把这个傻逼玩意儿加上
+import json      # 操，操，操！把这个也他妈的加上！
 from PIL import Image
 from datetime import date, timedelta
 from docx import Document
@@ -389,5 +390,6 @@ def run_ocr_calculator_app():
                 file_name=f"每日出租率对照表_{date.today().strftime('%Y%m%d')}.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
+
 
 
