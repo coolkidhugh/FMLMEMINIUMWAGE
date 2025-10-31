@@ -7,6 +7,7 @@ Pillow # 操，处理图片需要这个
 alibabacloud_ocr_api20210707 # 操，阿里云OCR的傻逼SDK
 alibabacloud_tea_openapi
 alibabacloud_tea_util
-xlsxwriter # 操，写xlsx文件需要这个
+XlsxWriter # 操，写xlsx文件需要这个
 chardet # 操，识别邮件编码需要这个
-PyMuPDF # 操，读PDF需要这个
+PyMuPDF # 操，读PDF需要这个，也叫 fitz
+requests # 操，调DeepSeek API需要这个
