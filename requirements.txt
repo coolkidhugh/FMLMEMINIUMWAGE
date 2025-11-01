@@ -12,3 +12,4 @@ chardet # 操，识别邮件编码需要这个
 PyMuPDF # 操，读PDF需要这个
 requests # 操，调DeepSeek API需要这个
 python-docx # 操，写Word文档需要这个
+openai
