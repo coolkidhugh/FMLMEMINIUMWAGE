@@ -17,14 +17,6 @@ import asyncio
 import requests # 假设 'requests' 库在环境中可用
 
 # --- 移除 V2 依赖 (阿里云) ---
-# try:
-#     from alibabacloud_ocr_api20210707.client import Client as OcrClient
-#     from alibabacloud_tea_openapi import models as open_api_models
-#     # 导入 Table Recognize (表格识别) 模型
-#     from alibabacloud_ocr_api20210707 import models as ocr_models
-#     ALIYUN_SDK_AVAILABLE = True
-# except ImportError:
-#     ALIYUN_SDK_AVAILABLE = False
 ALIYUN_SDK_AVAILABLE = False # 保留变量，但设为False
 
 # ==============================================================================
@@ -34,6 +26,7 @@ ALIYUN_SDK_AVAILABLE = False # 保留变量，但设为False
 async def get_gemini_vision_analysis(image: Image.Image) -> dict:
     """
     调用 Gemini API (gemini-2.5-flash-preview-09-2025) 来分析图片并返回结构化JSON。
+    会从 st.secrets 中读取 API Key。
     """
     st.write("正在调用 Gemini Vision API...")
     
@@ -44,8 +37,18 @@ async def get_gemini_vision_analysis(image: Image.Image) -> dict:
     image.save(buffered, format="JPEG")
     base64_image_data = base64.b64encode(buffered.getvalue()).decode('utf-8')
     
-    # 2. 定义API URL和Key (Key为空，由Canvas提供)
-    apiKey = "" # 由Canvas环境自动提供
+    # 2. 定义API URL和Key (*** V3.2 修改 ***)
+    try:
+        apiKey = st.secrets["gemini"]["api_key"]
+    except (KeyError, AttributeError):
+        st.error("操！没在 .streamlit/secrets.toml 里找到 [gemini] -> api_key！")
+        st.code("请在 .streamlit/secrets.toml 文件中添加：\n\n[gemini]\napi_key = \"YOUR_API_KEY_HERE\"\n")
+        return None
+
+    if not apiKey:
+        st.error("操！你 .streamlit/secrets.toml 里的 api_key 是空的！")
+        return None
+        
     apiUrl = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={apiKey}"
 
     # 3. 定义请求Prompt
