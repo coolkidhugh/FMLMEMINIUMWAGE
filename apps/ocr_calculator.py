@@ -167,7 +167,10 @@ def parse_table_ocr_to_dataframe(ocr_data: dict, building_name: str) -> pd.DataF
         if not found_our_building:
             if building_name in text:
                 found_our_building = True
-                 f"调试：找到了 '{building_name}' 标题行, row_idx: {row_idx}")
+                # --- (*** V2.6 修复开始 ***) ---
+                # 补上了 st.write()，修复 IndentationError
+                st.write(f"调试：找到了 '{building_name}' 标题行, row_idx: {row_idx}")
+                # --- (*** V2.6 修复结束 ***) ---
             continue # 继续寻找，直到找到我们的楼
 
         # 2. 已经找到了我们的楼，现在寻找数据
