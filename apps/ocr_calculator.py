@@ -11,85 +11,173 @@ from docx.shared import Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 
-# --- SDK 依赖 ---
-try:
-    from alibabacloud_ocr_api20210707.client import Client as OcrClient
-    from alibabacloud_tea_openapi import models as open_api_models
-    # 导入 Table Recognize (表格识别) 模型
-    from alibabacloud_ocr_api20210707 import models as ocr_models
-    ALIYUN_SDK_AVAILABLE = True
-except ImportError:
-    ALIYUN_SDK_AVAILABLE = False
+# --- 新增 V3 依赖 ---
+import base64
+import asyncio
+import requests # 假设 'requests' 库在环境中可用
+
+# --- 移除 V2 依赖 (阿里云) ---
+# try:
+#     from alibabacloud_ocr_api20210707.client import Client as OcrClient
+#     from alibabacloud_tea_openapi import models as open_api_models
+#     # 导入 Table Recognize (表格识别) 模型
+#     from alibabacloud_ocr_api20210707 import models as ocr_models
+#     ALIYUN_SDK_AVAILABLE = True
+# except ImportError:
+#     ALIYUN_SDK_AVAILABLE = False
+ALIYUN_SDK_AVAILABLE = False # 保留变量，但设为False
 
 # ==============================================================================
-# --- [核心功能 V2: 表格识别] ---
+# --- [核心功能 V3: Gemini Vision API] ---
 # ==============================================================================
 
-def get_aliyun_table_ocr(image: Image.Image) -> dict:
+async def get_gemini_vision_analysis(image: Image.Image) -> dict:
     """
-    调用阿里云 【表格识别】 (RecognizeTable) API。
-    这个API会返回一个结构化的JSON，而不仅仅是纯文本。
+    调用 Gemini API (gemini-2.5-flash-preview-09-2025) 来分析图片并返回结构化JSON。
     """
-    if not ALIYUN_SDK_AVAILABLE:
-        st.error("错误：未找到阿里云SDK (alibabacloud_ocr_api20210707)！")
-        return None
+    st.write("正在调用 Gemini Vision API...")
     
-    if "aliyun_credentials" not in st.secrets:
-        st.error("错误：未在 .streamlit/secrets.toml 中找到 [aliyun_credentials] 配置！")
-        return None
+    # 1. 将Pillow Image转为Base64
+    buffered = io.BytesIO()
+    if image.mode == 'RGBA':
+        image = image.convert('RGB')
+    image.save(buffered, format="JPEG")
+    base64_image_data = base64.b64encode(buffered.getvalue()).decode('utf-8')
     
-    access_key_id = st.secrets.aliyun_credentials.get("access_key_id")
-    access_key_secret = st.secrets.aliyun_credentials.get("access_key_secret")
+    # 2. 定义API URL和Key (Key为空，由Canvas提供)
+    apiKey = "" # 由Canvas环境自动提供
+    apiUrl = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={apiKey}"
 
-    if not access_key_id or not access_key_secret:
-        st.error("错误：阿里云 AccessKeyId 或 AccessKeySecret 未配置！")
-        return None
-
-    try:
-        config = open_api_models.Config(
-            access_key_id=access_key_id,
-            access_key_secret=access_key_secret,
-            endpoint='ocr-api.cn-hangzhou.aliyuncs.com'
-        )
-        client = OcrClient(config)
-
-        buffered = io.BytesIO()
-        if image.mode == 'RGBA':
-            image = image.convert('RGB')
-        
-        # 使用JPEG格式保存到内存
-        image.save(buffered, format="JPEG")
-        buffered.seek(0)
-        
-        # 1. 创建 RecognizeTableOcrRequest (*** 已修复 ***)
-        # 移除了 'output_format' 参数，因为它不受支持
-        request = ocr_models.RecognizeTableOcrRequest(
-            body=buffered
-        )
-        
-        # 2. 调用 recognize_table_ocr 方法 (*** 已修复 ***)
-        st.write("正在调用阿里云【表格识别】API...")
-        response = client.recognize_table_ocr(request)
-        st.write("API 调用完成。")
-
-        if response.status_code == 200 and response.body and response.body.data:
-            # 3. 解析返回的JSON数据
-            data = json.loads(response.body.data)
-            return data
-        else:
-            error_message = '无详细信息'
-            if response.body and hasattr(response.body, 'message'):
-                error_message = response.body.message
-            raise Exception(f"阿里云 表格识别 API 返回错误: {error_message}")
-
-    except Exception as e:
-        st.error(f"调用阿里云 表格识别 API 失败: {e}")
-        st.code(traceback.format_exc())
-        return None
-
-def parse_table_ocr_to_dataframe(ocr_data: dict, building_name: str) -> pd.DataFrame:
+    # 3. 定义请求Prompt
+    prompt = """
+    请分析这张每日出租率对照表的图片。
+    图片包含两个表格：'金陵楼' 和 '亚太商务楼'。
+    
+    你的任务是：
+    1.  为这两个表格分别提取7天的数据。
+    2.  如果一个单元格同时有打印数字和手写数字（通常是划掉了打印数字），请**只使用手写数字**，因为手写的是最终的正确值。
+    3.  请提取以下列的数据：'日期', '星期', '当日预计', '当日实际', '周一预计', '平均房价'。
+    4.  请忽略 '当日增加率', '当日实际' (周一的), '增加百分率' 这几列。
+    5.  将所有提取的值作为字符串返回，保留原始格式（例如 '83.4%' 或 '5774'）。
+    
+    请严格按照下面提供的JSON schema格式返回数据。
     """
-    V2.4: 彻底重写解析逻辑，以处理API返回 "一个大表格" 的情况。
+
+    # 4. 定义JSON Schema
+    response_schema = {
+      "type": "OBJECT",
+      "properties": {
+        "jinling": {
+          "description": "金陵楼的7天数据",
+          "type": "ARRAY",
+          "items": {
+            "type": "OBJECT",
+            "properties": {
+              "date": { "type": "STRING", "description": "日期, e.g., '20/10'" },
+              "weekday": { "type": "STRING", "description": "星期, e.g., '一'" },
+              "expected_today_raw": { "type": "STRING", "description": "当日预计, e.g., '78.4%'" },
+              "actual_today_raw": { "type": "STRING", "description": "当日实际 (使用手写值), e.g., '83.4%'" },
+              "expected_monday_raw": { "type": "STRING", "description": "周一预计, e.g., '83.4%'" },
+              "avg_price_raw": { "type": "STRING", "description": "平均房价, e.g., '5774'" }
+            },
+            "required": ["date", "weekday", "expected_today_raw", "actual_today_raw", "expected_monday_raw", "avg_price_raw"]
+          }
+        },
+        "yatai": {
+          "description": "亚太商务楼的7天数据",
+          "type": "ARRAY",
+          "items": {
+            "type": "OBJECT",
+            "properties": {
+              "date": { "type": "STRING", "description": "日期, e.g., '20/10'" },
+              "weekday": { "type": "STRING", "description": "星期, e.g., '一'" },
+              "expected_today_raw": { "type": "STRING", "description": "当日预计, e.g., '67.4%'" },
+              "actual_today_raw": { "type": "STRING", "description": "当日实际 (使用手写值), e.g., '81.4%'" },
+              "expected_monday_raw": { "type": "STRING", "description": "周一预计, e.g., '81.4%'" },
+              "avg_price_raw": { "type": "STRING", "description": "平均房价, e.g., '7069'" }
+            },
+            "required": ["date", "weekday", "expected_today_raw", "actual_today_raw", "expected_monday_raw", "avg_price_raw"]
+          }
+        }
+      },
+      "required": ["jinling", "yatai"]
+    }
+
+    # 5. 构建Payload
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    { "text": prompt },
+                    {
+                        "inlineData": {
+                            "mimeType": "image/jpeg",
+                            "data": base64_image_data
+                        }
+                    }
+                ]
+            }
+        ],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": response_schema
+        }
+    }
+
+    # 6. 发起API请求 (带指数退避)
+    max_retries = 5
+    delay = 1
+    for attempt in range(max_retries):
+        try:
+            # 在 Streamlit 中，我们需要在一个单独的线程中运行阻塞的 I/O 操作
+            response = await asyncio.to_thread(
+                lambda: requests.post(
+                    apiUrl,
+                    headers={'Content-Type': 'application/json'},
+                    data=json.dumps(payload),
+                    timeout=60  # 60秒超时
+                )
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if (
+                    result.get("candidates") and
+                    result["candidates"][0].get("content", {}).get("parts") and
+                    result["candidates"][0]["content"]["parts"][0].get("text")
+                ):
+                    st.write("API 调用成功，正在解析JSON...")
+                    json_text = result["candidates"][0]["content"]["parts"][0]["text"]
+                    return json.loads(json_text)
+                else:
+                    st.error(f"Gemini API 返回了意外的结构: {result}")
+                    return None
+            elif response.status_code == 429 or response.status_code >= 500:
+                # 触发了重试 (速率限制或服务器错误)
+                st.warning(f"API 返回 {response.status_code}, 正在重试... (第 {attempt + 1}/{max_retries} 次)")
+                await asyncio.sleep(delay)
+                delay *= 2
+            else:
+                # 客户端错误, 不重试
+                st.error(f"Gemini API 请求失败: {response.status_code}")
+                st.error(f"错误详情: {response.text}")
+                return None
+        except requests.exceptions.Timeout:
+            st.warning(f"API 请求超时, G正在重试... (第 {attempt + 1}/{max_retries} 次)")
+            await asyncio.sleep(delay)
+            delay *= 2
+        except Exception as e:
+            st.error(f"调用 Gemini API 失败: {e}")
+            st.code(traceback.format_exc())
+            return None
+            
+    st.error(f"API 请求在 {max_retries} 次重试后失败。")
+    return None
+
+def populate_dataframe_from_json(ocr_data: dict, building_name: str) -> pd.DataFrame:
+    """
+    V3: 使用 Gemini 返回的结构化 JSON 来填充 DataFrame。
     """
     
     # 1. 准备一个空的默认DataFrame
@@ -108,121 +196,39 @@ def parse_table_ocr_to_dataframe(ocr_data: dict, building_name: str) -> pd.DataF
     df = pd.DataFrame(initial_data)
 
     # 2. 检查
-    if not ocr_data or 'prism_tablesInfo' not in ocr_data or not ocr_data.get('prism_tablesInfo'):
-        st.warning("OCR结果为空或未识别到'prism_tablesInfo'结构。")
-        return df
-    if 'prism_wordsInfo' not in ocr_data:
-        st.warning("OCR结果为空或未识别到'prism_wordsInfo'结构。")
+    if not ocr_data:
+        st.warning("Gemini Vision 未返回数据。")
         return df
 
-    all_words = ocr_data.get('prism_wordsInfo', [])
-    # 假设所有数据都在第一个表格中
-    try:
-        target_table = ocr_data.get('prism_tablesInfo')[0]
-    except IndexError:
-        st.warning("OCR结果'prism_tablesInfo'为空数组。")
-        return df
+    building_key = "jinling" if building_name == "金陵楼" else "yatai"
     
-    # 3. 找到表格后，解析数据行
-    COLUMN_MAPPING = {
-        2: "当日预计 (%)",  # 第3列表格
-        3: "当日实际 (%)",  # 第4列表格
-        5: "周一预计 (%)",  # 第6列表格
-        8: "平均房价"      # 第9列表格
-    }
-    
-    other_building = "亚太商务楼" if building_name == "金陵楼" else "金陵楼"
-    date_regex = re.compile(r'\d{1,2}[/-]\d{1,2}') 
-    
-    df_row_index = 0
-    found_our_building = False
-    
-    # --- (*** V2.5 修复开始 ***) ---
-    # 过滤 + 排序:
-    # 确保只处理包含 'x' 和 'y' 键的单元格，防止 KeyError
-    valid_cells = [c for c in target_table.get('cellInfos', []) if 'y' in c and 'x' in c]
-    if not valid_cells:
-        st.warning("表格 'cellInfos' 中未找到任何有效的单元格（缺少 'x' 或 'y' 键）。")
+    if building_key not in ocr_data:
+        st.warning(f"在Gemini的JSON响应中未找到 '{building_key}' 键。")
         return df
         
-    cells = sorted(valid_cells, key=lambda c: (c['y'], c['x']))
-    # --- (*** V2.5 修复结束 ***) ---
+    building_data = ocr_data[building_key]
     
-    current_table_row = -1
-    
-    for cell in cells:
-        row_idx = cell['y'] # 'y' 是行索引
-        col_idx = cell['x'] # 'x' 是列索引
-        
-        word_ids = cell.get('word_ids', [])
-        if not word_ids:
-            continue # 空单元格
-            
-        text = "".join([all_words[i]['word'] for i in word_ids if i < len(all_words)]).strip()
-        if not text:
+    if not isinstance(building_data, list):
+        st.warning(f"'{building_key}' 键对应的值不是一个列表。")
+        return df
+
+    # 3. 填充DataFrame
+    for i in range(min(len(building_data), 7)): # 最多填7行
+        row_data = building_data[i]
+        try:
+            # 我们可以选择覆盖日期和星期，或者只匹配
+            # 覆盖更简单
+            df.at[i, "日期"] = row_data.get("date", df.at[i, "日期"])
+            df.at[i, "星期"] = row_data.get("weekday", df.at[i, "星期"])
+            df.at[i, "当日预计 (%)"] = row_data.get("expected_today_raw", "0.0")
+            df.at[i, "当日实际 (%)"] = row_data.get("actual_today_raw", "0.0")
+            df.at[i, "周一预计 (%)"] = row_data.get("expected_monday_raw", "0.0")
+            df.at[i, "平均房价"] = row_data.get("avg_price_raw", "0.0")
+        except Exception as e:
+            st.error(f"填充第 {i} 行数据时出错: {e}")
             continue
-
-        # 状态机：
-        # 1. 寻找我们的 building_name
-        if not found_our_building:
-            if building_name in text:
-                found_our_building = True
-                # --- (*** V2.6 修复开始 ***) ---
-                # 补上了 st.write()，修复 IndentationError
-                st.write(f"调试：找到了 '{building_name}' 标题行, row_idx: {row_idx}")
-                # --- (*** V2.6 修复结束 ***) ---
-            continue # 继续寻找，直到找到我们的楼
-
-        # 2. 已经找到了我们的楼，现在寻找数据
-        
-        # 如果我们找到了另一栋楼的名字，说明我们的数据结束了
-        if other_building in text:
-            st.write(f"调试：找到了 '{other_building}'，停止解析 '{building_name}'。")
-            break # 停止解析
-
-        # 这是一个新行
-        if row_idx != current_table_row:
-            current_table_row = row_idx
-            # 检查这是不是一个数据行 (通过检查第0列是否是日期)
-            if col_idx == 0 and date_regex.search(text):
-                # 这是一个数据行
-                pass
-            else:
-                # 这不是数据行 (可能是表头), 跳过
-                current_table_row = -1 
-                continue
-        
-        # 如果我们正在一个有效的数据行里
-        if current_table_row != -1:
-            if df_row_index >= 7:
-                st.write(f"调试：'{building_name}' 的7行数据已填满。")
-                break # DataFrame 已经填满了
             
-            # 检查这个单元格是不是我们需要的列
-            if col_idx in COLUMN_MAPPING:
-                column_name = COLUMN_MAPPING[col_idx]
-                df.at[df_row_index, column_name] = text
-        
-            # 检查是否该换到DataFrame的下一行
-            # (假设 '平均房价' 是表格的最后一列，col_index 8)
-            if col_idx == 8: # 假设第8列是最后一列
-                df_row_index += 1
-
-    if not found_our_building:
-         # 检查表头 (tableHeadTail)
-        if 'tableHeadTail' in ocr_data:
-            for head_info in ocr_data.get('tableHeadTail', []):
-                if building_name in head_info.get('head', []):
-                    found_our_building = True
-                    st.write(f"调试：在 'tableHeadTail' 中找到了 '{building_name}'。")
-                    # 重新运行一次解析，但这次假定已找到
-                    # 这是个简化的处理，实际可能需要更复杂的逻辑
-                    # 但至少我们知道它在了
-                    break
-        
-        if not found_our_building:
-             st.warning(f"在OCR结果中未找到包含 '{building_name}' 的单元格或表头。")
-         
+    st.write(f"成功从Gemini JSON填充了 '{building_name}' 的 {min(len(building_data), 7)} 行数据。")
     return df
 
 # ==============================================================================
@@ -374,38 +380,45 @@ def create_word_doc(jl_df, yt_df, jl_summary, yt_summary):
         return None
 
 # ==============================================================================
-# --- [Streamlit 界面] ---
+# --- [Streamlit 界面 V3] ---
 # ==============================================================================
 def run_ocr_calculator_app():
-    st.title("OCR出租率计算器 (V2 - 表格识别版)")
+    st.title("OCR出租率计算器 (V3 - Gemini Vision)")
     st.markdown("1. 上传手写表格的照片。")
-    st.markdown("2. 使用**阿里云表格识别API**，智能解析表格并填充。")
+    st.markdown("2. 使用 **Gemini Vision API** 智能解析表格（优先读取手写值）。")
     st.markdown("3. **人工核对**下方的可编辑表格，修正识别错误的数字。")
     st.markdown("4. 点击“计算”按钮，生成最终报表并下载Word文档。")
 
-    uploaded_file = st.file_uploader("上传图片文件", type=["png", "jpg", "jpeg", "bmp"], key="ocr_calc_uploader_v2")
+    uploaded_file = st.file_uploader("上传图片文件", type=["png", "jpg", "jpeg", "bmp"], key="ocr_calc_uploader_v3") # 新Key
 
     if uploaded_file:
         image = Image.open(uploaded_file)
         st.image(image, caption="上传的图片", width=300)
 
-        if st.button("开始识别 (表格模式)", type="primary"):
-            with st.spinner('正在调用阿里云【表格识别】API...'):
-                ocr_data = get_aliyun_table_ocr(image)
+        if st.button("开始识别 (Gemini Vision)", type="primary"): # 新按钮
+            with st.spinner('正在调用 Gemini Vision API (这可能需要一些时间)...'):
+                
+                # 在 Streamlit 中运行异步函数
+                try:
+                    ocr_data = asyncio.run(get_gemini_vision_analysis(image))
+                except Exception as e:
+                    st.error(f"运行异步Gemini任务时出错: {e}")
+                    ocr_data = None
                 
                 if ocr_data:
                     st.session_state.ocr_data = ocr_data
-                    st.info("API调用成功，正在解析返回的表格JSON...")
-                    st.session_state.jl_df = parse_table_ocr_to_dataframe(ocr_data, "金陵楼")
-                    st.session_state.yt_df = parse_table_ocr_to_dataframe(ocr_data, "亚太商务楼")
+                    st.info("API调用成功，正在解析返回的JSON...")
+                    # *** V3: 使用新的解析函数 ***
+                    st.session_state.jl_df = populate_dataframe_from_json(ocr_data, "金陵楼")
+                    st.session_state.yt_df = populate_dataframe_from_json(ocr_data, "亚太商务楼")
                     st.success("解析完成！请检查下面的表格，手动修正错误。")
                     
-                    with st.expander("查看阿里云返回的原始JSON数据"):
+                    with st.expander("查看 Gemini 返回的原始JSON数据"):
                         st.json(ocr_data)
                 else:
-                    st.error("表格识别API未返回有效数据。")
-                    st.session_state.jl_df = parse_table_ocr_to_dataframe(None, "金陵楼") # 生成空表
-                    st.session_state.yt_df = parse_table_ocr_to_dataframe(None, "亚太商务楼")
+                    st.error("Gemini API 未返回有效数据。")
+                    st.session_state.jl_df = populate_dataframe_from_json(None, "金陵楼") # 生成空表
+                    st.session_state.yt_df = populate_dataframe_from_json(None, "亚太商务楼")
     
     # --- 表格编辑区 ---
     if 'jl_df' in st.session_state:
@@ -422,7 +435,7 @@ def run_ocr_calculator_app():
                 "星期": st.column_config.TextColumn(label="星期", disabled=True),
             },
             num_rows="fixed",
-            key="editor_jl_v2"
+            key="editor_jl_v3" # 新Key
         )
         
         st.subheader("亚太商务楼 (请在此处编辑)")
@@ -437,7 +450,7 @@ def run_ocr_calculator_app():
                 "星期": st.column_config.TextColumn(label="星期", disabled=True),
             },
             num_rows="fixed",
-            key="editor_yt_v2"
+            key="editor_yt_v3" # 新Key
         )
 
         if st.button("重新计算最终结果", type="primary"):
@@ -494,13 +507,13 @@ def run_ocr_calculator_app():
             st.download_button(
                 label="下载Word文档",
                 data=doc_data,
-                file_name="每日出租率对照表_V2.docx",
+                file_name="每日出租率对照表_V3_Gemini.docx", # 新文件名
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
 
 # --- 主程序入口 ---
 if __name__ == "__main__":
     # 设置页面标题
-    st.set_page_config(page_title="OCR出租率计算器 V2")
+    st.set_page_config(page_title="OCR出租率计算器 V3")
     run_ocr_calculator_app()
 
