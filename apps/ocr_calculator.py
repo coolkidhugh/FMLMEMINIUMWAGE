@@ -11,138 +11,102 @@ from docx.shared import Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 
-# --- 新增 V4 依赖 (OpenAI) ---
-import base64
-from openai import OpenAI # 导入OpenAI库
+# --- 新增 V5 依赖 (Alibaba Cloud) ---
+try:
+    from alibabacloud_ocr_api20210707.client import Client as OcrClient
+    from alibabacloud_tea_openapi import models as open_api_models
+    from alibabacloud_ocr_api20210707 import models as ocr_models
+    ALIYUN_SDK_AVAILABLE = True
+except ImportError:
+    ALIYUN_SDK_AVAILABLE = False
+    # 在UI中会显示错误
 
-# --- 移除 V3 依赖 (Gemini) ---
-# import asyncio
-# import requests
+# --- 移除 V4 依赖 (OpenAI) ---
+# from openai import OpenAI
+# import base64
 
 # ==============================================================================
-# --- [核心功能 V4: OpenAI Vision API] ---
+# --- [核心功能 V5: Alibaba Cloud General OCR] ---
 # ==============================================================================
 
-def get_openai_vision_analysis(image: Image.Image) -> dict:
+def get_aliyun_ocr(image: Image.Image) -> str:
     """
-    调用 OpenAI API (gpt-4o) 来分析图片并返回结构化JSON。
-    会从 st.secrets 中读取 API Key。
+    V5: 调用阿里云通用文字识别 (RecognizeGeneral)，并从 st.secrets 读取密钥。
     """
-    st.write("正在调用 OpenAI GPT-4o Vision API...")
+    st.write("正在调用 Alibaba Cloud General OCR API...")
     
-    # 1. 将Pillow Image转为Base64
+    if not ALIYUN_SDK_AVAILABLE:
+        st.error("错误：你没有安装阿里云SDK！请运行: pip install alibabacloud_ocr_api20210707")
+        return None
+    
+    # 1. 从 st.secrets 读取密钥 (*** V5 修改 ***)
+    try:
+        access_key_id = st.secrets["aliyun"]["access_key_id"]
+        access_key_secret = st.secrets["aliyun"]["access_key_secret"]
+    except (KeyError, AttributeError):
+        st.error("错误：没在 .streamlit/secrets.toml 里找到 [aliyun] -> access_key_id 或 access_key_secret！")
+        st.code("请在 .streamlit/secrets.toml 文件中添加：\n\n[aliyun]\naccess_key_id = \"YOUR_KEY_ID\"\naccess_key_secret = \"YOUR_KEY_SECRET\"\n")
+        return None
+
+    if not access_key_id or not access_key_secret:
+        st.error("错误：你 .streamlit/secrets.toml 里的阿里云密钥是空的！")
+        return None
+
+    # 2. 初始化客户端
+    try:
+        config = open_api_models.Config(
+            access_key_id=access_key_id,
+            access_key_secret=access_key_secret,
+            endpoint='ocr-api.cn-hangzhou.aliyuncs.com'
+        )
+        client = OcrClient(config)
+    except Exception as e:
+        st.error(f"初始化阿里云客户端失败: {e}")
+        return None
+        
+    # 3. 准备图片
     buffered = io.BytesIO()
     if image.mode == 'RGBA':
         image = image.convert('RGB')
-    image.save(buffered, format="JPEG")
-    base64_image_data = base64.b64encode(buffered.getvalue()).decode('utf-8')
     
-    # 2. 定义API URL和Key (*** V4.0 修改 ***)
+    # 不压缩，使用高质量
+    image.save(buffered, format="JPEG", quality=95)
+    buffered.seek(0)
+    
+    # 4. 发起请求
+    request = ocr_models.RecognizeGeneralRequest(body=buffered)
+    
     try:
-        apiKey = st.secrets["openai"]["api_key"]
-    except (KeyError, AttributeError):
-        st.error("错误：没在 .streamlit/secrets.toml 里找到 [openai] -> api_key！")
-        st.code("请在 .streamlit/secrets.toml 文件中添加：\n\n[openai]\napi_key = \"sk-YOUR_API_KEY_HERE\"\n")
-        return None
+        response = client.recognize_general(request)
 
-    if not apiKey:
-        st.error("错误：你 .streamlit/secrets.toml 里的 api_key 是空的！")
-        return None
-    
-    # 3. 初始化 OpenAI 客户端
-    try:
-        client = OpenAI(api_key=apiKey)
-    except Exception as e:
-        st.error(f"初始化 OpenAI 客户端失败: {e}")
-        return None
-
-    # 4. 定义JSON Schema (作为Prompt的一部分)
-    response_schema_example = {
-      "jinling": [
-        {
-          "date": "20/10",
-          "weekday": "一",
-          "expected_today_raw": "78.4%",
-          "actual_today_raw": "83.4%",
-          "expected_monday_raw": "83.4%",
-          "avg_price_raw": "5774"
-        }
-      ],
-      "yatai": [
-        {
-          "date": "20/10",
-          "weekday": "一",
-          "expected_today_raw": "67.4%",
-          "actual_today_raw": "81.4%",
-          "expected_monday_raw": "81.4%",
-          "avg_price_raw": "7069"
-        }
-      ]
-    }
-
-    # 5. 定义请求Prompt (*** V4.0 修改 ***)
-    prompt = f"""
-    请分析这张每日出租率对照表的图片。
-    图片包含两个表格：'金陵楼' 和 '亚太商务楼'。
-    
-    你的任务是：
-    1.  为这两个表格分别提取7天的数据。
-    2.  如果一个单元格同时有打印数字和手写数字（通常是划掉了打印数字），请**只使用手写数字**，因为手写的是最终的正确值。
-    3.  请提取以下列的数据：'日期', '星期', '当日预计', '当日实际', '周一预计', '平均房价'。
-    4.  请忽略 '当日增加率', '当日实际' (周一的), '增加百分率' 这几列。
-    5.  将所有提取的值作为字符串返回，保留原始格式（例如 '83.4%' 或 '5774'）。
-    
-    请**只返回一个JSON对象**，不要包含任何解释性文本或 "```json" 标记。
-    JSON对象必须严格遵循以下结构（这是一个例子，你需要填满7天的数据）：
-    {json.dumps(response_schema_example, indent=2, ensure_ascii=False)}
-    """
-
-    # 6. 发起API请求 (*** V4.0 修改 ***)
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o", # 使用 gpt-4o
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{base64_image_data}"
-                            },
-                        },
-                    ],
-                }
-            ],
-            max_tokens=4096,
-            temperature=0.0, # 低温以保证JSON的稳定性
-            response_format={"type": "json_object"} # 请求JSON对象输出
-        )
-        
-        if response.choices and response.choices[0].message and response.choices[0].message.content:
-            st.write("API 调用成功，正在解析JSON...")
-            json_text = response.choices[0].message.content
-            
-            # 尝试解析模型返回的JSON
-            try:
-                return json.loads(json_text)
-            except json.JSONDecodeError:
-                st.error(f"OpenAI 返回了无效的JSON: {json_text}")
+        if response.status_code == 200 and response.body and response.body.data:
+            data = json.loads(response.body.data)
+            content = data.get('content', '')
+            if content:
+                st.write("API 调用成功，获取到文本内容。")
+                return content
+            else:
+                st.error("阿里云 OCR API 返回了空内容。")
+                st.json(data) # 显示返回的JSON
                 return None
         else:
-            st.error(f"OpenAI API 返回了意外的结构: {response}")
+            error_message = '无详细信息'
+            if response.body and hasattr(response.body, 'message'):
+                error_message = response.body.message
+            elif response.body:
+                error_message = str(response.body)
+            st.error(f"阿里云 OCR API 返回错误 (Code: {response.status_code}): {error_message}")
             return None
 
     except Exception as e:
-        st.error(f"调用 OpenAI API 失败: {e}")
+        st.error(f"调用阿里云 OCR API 失败: {e}")
         st.code(traceback.format_exc())
         return None
 
-def populate_dataframe_from_json(ocr_data: dict, building_name: str) -> pd.DataFrame:
+def parse_ocr_to_dataframe(ocr_text: str, building_name: str) -> pd.DataFrame:
     """
-    V3/V4: 使用 AI 返回的结构化 JSON 来填充 DataFrame。
-    (此函数无需修改)
+    V5: 恢复使用V1的稳健的文本行解析器。
+    它处理由 RecognizeGeneral 返回的单个文本块。
     """
     
     # 1. 准备一个空的默认DataFrame
@@ -160,45 +124,102 @@ def populate_dataframe_from_json(ocr_data: dict, building_name: str) -> pd.DataF
     }
     df = pd.DataFrame(initial_data)
 
-    # 2. 检查
-    if not ocr_data:
-        st.warning("AI Vision 未返回数据。")
+    if not ocr_text:
+        st.warning("OCR 文本为空，无法解析。")
         return df
 
-    building_key = "jinling" if building_name == "金陵楼" else "yatai"
+    lines = ocr_text.split('\n')
+    building_lines = []
+    found_building = False
     
-    if building_key not in ocr_data:
-        st.warning(f"在AI的JSON响应中未找到 '{building_key}' 键。")
-        return df
-        
-    building_data = ocr_data[building_key]
-    
-    if not isinstance(building_data, list):
-        st.warning(f"'{building_key}' 键对应的值不是一个列表。")
-        return df
+    other_building = "亚太商务楼" if building_name == "金陵楼" else "金陵楼"
+    # 日期正则, 匹配 '20/10' 或 '20-10'
+    date_regex = re.compile(r'\d{1,2}[/-]\d{1,2}') 
 
-    # 3. 填充DataFrame
-    for i in range(min(len(building_data), 7)): # 最多填7行
-        row_data = building_data[i]
-        try:
-            # 我们可以选择覆盖日期和星期，或者只匹配
-            # 覆盖更简单
-            df.at[i, "日期"] = row_data.get("date", df.at[i, "日期"])
-            df.at[i, "星期"] = row_data.get("weekday", df.at[i, "星期"])
-            df.at[i, "当日预计 (%)"] = row_data.get("expected_today_raw", "0.0")
-            df.at[i, "当日实际 (%)"] = row_data.get("actual_today_raw", "0.0")
-            df.at[i, "周一预计 (%)"] = row_data.get("expected_monday_raw", "0.0")
-            df.at[i, "平均房价"] = row_data.get("avg_price_raw", "0.0")
-        except Exception as e:
-            st.error(f"填充第 {i} 行数据时出错: {e}")
+    # 2. 从文本块中分离出属于本楼的数据行
+    for line in lines:
+        line = line.strip()
+        if not line:
             continue
             
-    st.write(f"成功从OpenAI JSON填充了 '{building_name}' 的 {min(len(building_data), 7)} 行数据。")
+        if building_name in line:
+            found_building = True
+            continue # 这是标题行，跳过
+        
+        # 如果找到了另一栋楼，就停止
+        if other_building in line and building_name not in line:
+            found_building = False
+            break 
+        
+        if found_building:
+            # 关键：只处理包含日期的行
+            if date_regex.search(line):
+                building_lines.append(line)
+
+    if not building_lines:
+        st.warning(f"在OCR结果中未找到 '{building_name}' 的有效数据行。")
+        return df
+
+    # 3. 解析数据行
+    row_index = 0
+    for line in building_lines:
+        if row_index >= 7: # 最多7行
+            break
+        
+        parts = line.split()
+        data_parts = []
+        
+        # 找到数据开始的位置 (日期之后)
+        found_data_start = False
+        for i, part in enumerate(parts):
+            if date_regex.search(part):
+                # 找到了日期, 检查下一个是不是星期
+                if (i + 1) < len(parts) and parts[i+1] in weekdays_zh_map:
+                    # 是星期, 数据从 i+2 开始
+                    data_parts = parts[i+2:]
+                else:
+                    # 不是星期 (OCR漏了), 数据从 i+1 开始
+                    data_parts = parts[i+1:]
+                found_data_start = True
+                break
+        
+        if not found_data_start:
+            # st.warning(f"跳过行 (未找到数据): {line}") # 这条警告太吵了
+            continue
+
+        # 4. 填充DataFrame (基于V1的硬编码索引)
+        # 假设顺序: [预计, 实际, 增, 周一预计, 周一实际, 增百, 房价]
+        try:
+            if len(data_parts) >= 1:
+                df.at[row_index, "当日预计 (%)"] = data_parts[0]
+            if len(data_parts) >= 2:
+                df.at[row_index, "当日实际 (%)"] = data_parts[1]
+            # data_parts[2] (当日增加率) - 忽略
+            if len(data_parts) >= 4:
+                df.at[row_index, "周一预计 (%)"] = data_parts[3]
+            # data_parts[4], data_parts[5] - 忽略
+            if len(data_parts) >= 7:
+                # 房价可能是第7个 (data_parts[6])
+                df.at[row_index, "平均房价"] = data_parts[6]
+            
+            # 覆盖日期 (使用OCR识别到的)
+            date_match = date_regex.search(line)
+            if date_match:
+                df.at[row_index, "日期"] = date_match.group(0).replace('-', '/')
+            
+        except IndexError:
+            st.warning(f"解析数据行 '{line}' 时索引越界，数据可能不完整。")
+        except Exception as e:
+            st.error(f"解析数据行 '{line}' 时发生意外错误: {e}")
+        
+        row_index += 1
+        
+    st.write(f"成功从Alibaba OCR文本中解析了 '{building_name}' 的 {row_index} 行数据。")
     return df
 
 # ==============================================================================
 # --- [核心功能 V1: 计算和Word生成] ---
-# (这部分代码和V1完全一样，因为它们只依赖DataFrame)
+# (这部分代码和V1/V4完全一样，因为它们只依赖DataFrame)
 # ==============================================================================
 
 def get_calc_value(value_str):
@@ -345,45 +366,47 @@ def create_word_doc(jl_df, yt_df, jl_summary, yt_summary):
         return None
 
 # ==============================================================================
-# --- [Streamlit 界面 V4] ---
+# --- [Streamlit 界面 V5] ---
 # ==============================================================================
 def run_ocr_calculator_app():
-    st.title("OCR出租率计算器 (V4 - OpenAI Vision)")
+    st.title("OCR出租率计算器 (V5 - Alibaba Cloud)")
     st.markdown("1. 上传手写表格的照片。")
-    st.markdown("2. 使用 **OpenAI GPT-4o API** 智能解析表格（优先读取手写值）。")
+    st.markdown("2. 使用 **Alibaba Cloud 通用识别 API** 解析表格。")
     st.markdown("3. **人工核对**下方的可编辑表格，修正识别错误的数字。")
     st.markdown("4. 点击“计算”按钮，生成最终报表并下载Word文档。")
 
-    uploaded_file = st.file_uploader("上传图片文件", type=["png", "jpg", "jpeg", "bmp"], key="ocr_calc_uploader_v4") # 新Key
+    uploaded_file = st.file_uploader("上传图片文件", type=["png", "jpg", "jpeg", "bmp"], key="ocr_calc_uploader_v5") # 新Key
 
     if uploaded_file:
         image = Image.open(uploaded_file)
         st.image(image, caption="上传的图片", width=300)
 
-        if st.button("开始识别 (OpenAI Vision)", type="primary"): # 新按钮
-            with st.spinner('正在调用 OpenAI Vision API (这可能需要一些时间)...'):
-                
-                # *** V4.0: 使用同步的 OpenAI 调用 ***
-                try:
-                    ocr_data = get_openai_vision_analysis(image)
-                except Exception as e:
-                    st.error(f"运行OpenAI任务时出错: {e}")
-                    ocr_data = None
-                
-                if ocr_data:
-                    st.session_state.ocr_data = ocr_data
-                    st.info("API调用成功，正在解析返回的JSON...")
-                    # *** V3/V4: 使用通用的解析函数 ***
-                    st.session_state.jl_df = populate_dataframe_from_json(ocr_data, "金陵楼")
-                    st.session_state.yt_df = populate_dataframe_from_json(ocr_data, "亚太商务楼")
-                    st.success("解析完成！请检查下面的表格，手动修正错误。")
+        if st.button("开始识别 (Alibaba OCR)", type="primary"): # 新按钮
+            if not ALIYUN_SDK_AVAILABLE:
+                st.error("错误：阿里云SDK未安装。请在 requirements.txt 中添加 alibabacloud_ocr_api20210707")
+            else:
+                with st.spinner('正在调用 Alibaba Cloud OCR API...'):
                     
-                    with st.expander("查看 OpenAI 返回的原始JSON数据"):
-                        st.json(ocr_data)
-                else:
-                    st.error("OpenAI API 未返回有效数据。")
-                    st.session_state.jl_df = populate_dataframe_from_json(None, "金陵楼") # 生成空表
-                    st.session_state.yt_df = populate_dataframe_from_json(None, "亚太商务楼")
+                    try:
+                        ocr_text = get_aliyun_ocr(image)
+                    except Exception as e:
+                        st.error(f"运行Alibaba OCR任务时出错: {e}")
+                        ocr_text = None
+                    
+                    if ocr_text:
+                        st.session_state.ocr_text = ocr_text
+                        st.info("API调用成功，正在解析返回的文本...")
+                        
+                        st.session_state.jl_df = parse_ocr_to_dataframe(ocr_text, "金陵楼")
+                        st.session_state.yt_df = parse_ocr_to_dataframe(ocr_text, "亚太商务楼")
+                        st.success("解析完成！请检查下面的表格，手动修正错误。")
+                        
+                        with st.expander("查看 Alibaba OCR 返回的原始文本"):
+                            st.text_area("OCR 纯文本结果", ocr_text, height=300)
+                    else:
+                        st.error("Alibaba OCR API 未返回有效文本数据。")
+                        st.session_state.jl_df = parse_ocr_to_dataframe(None, "金陵楼") # 生成空表
+                        st.session_state.yt_df = parse_ocr_to_dataframe(None, "亚太商务楼")
     
     # --- 表格编辑区 ---
     if 'jl_df' in st.session_state:
@@ -400,7 +423,7 @@ def run_ocr_calculator_app():
                 "星期": st.column_config.TextColumn(label="星期", disabled=True),
             },
             num_rows="fixed",
-            key="editor_jl_v4" # 新Key
+            key="editor_jl_v5" # 新Key
         )
         
         st.subheader("亚太商务楼 (请在此处编辑)")
@@ -415,7 +438,7 @@ def run_ocr_calculator_app():
                 "星期": st.column_config.TextColumn(label="星期", disabled=True),
             },
             num_rows="fixed",
-            key="editor_yt_v4" # 新Key
+            key="editor_yt_v5" # 新Key
         )
 
         if st.button("重新计算最终结果", type="primary"):
@@ -472,13 +495,13 @@ def run_ocr_calculator_app():
             st.download_button(
                 label="下载Word文档",
                 data=doc_data,
-                file_name="每日出租率对照表_V4_OpenAI.docx", # 新文件名
+                file_name="每日出租率对照表_V5_Alibaba.docx", # 新文件名
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
 
 # --- 主程序入口 ---
 if __name__ == "__main__":
     # 设置页面标题
-    st.set_page_config(page_title="OCR出租率计算器 V4")
+    st.set_page_config(page_title="OCR出租率计算器 V5")
     run_ocr_calculator_app()
 
