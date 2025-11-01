@@ -137,7 +137,16 @@ def parse_table_ocr_to_dataframe(ocr_data: dict, building_name: str) -> pd.DataF
     df_row_index = 0
     found_our_building = False
     
-    cells = sorted(target_table.get('cellInfos', []), key=lambda c: (c['y'], c['x']))
+    # --- (*** V2.5 修复开始 ***) ---
+    # 过滤 + 排序:
+    # 确保只处理包含 'x' 和 'y' 键的单元格，防止 KeyError
+    valid_cells = [c for c in target_table.get('cellInfos', []) if 'y' in c and 'x' in c]
+    if not valid_cells:
+        st.warning("表格 'cellInfos' 中未找到任何有效的单元格（缺少 'x' 或 'y' 键）。")
+        return df
+        
+    cells = sorted(valid_cells, key=lambda c: (c['y'], c['x']))
+    # --- (*** V2.5 修复结束 ***) ---
     
     current_table_row = -1
     
@@ -158,7 +167,7 @@ def parse_table_ocr_to_dataframe(ocr_data: dict, building_name: str) -> pd.DataF
         if not found_our_building:
             if building_name in text:
                 found_our_building = True
-                st.write(f"调试：找到了 '{building_name}' 标题行, row_idx: {row_idx}")
+                 f"调试：找到了 '{building_name}' 标题行, row_idx: {row_idx}")
             continue # 继续寻找，直到找到我们的楼
 
         # 2. 已经找到了我们的楼，现在寻找数据
@@ -491,5 +500,4 @@ if __name__ == "__main__":
     # 设置页面标题
     st.set_page_config(page_title="OCR出租率计算器 V2")
     run_ocr_calculator_app()
-
 
