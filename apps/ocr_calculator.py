@@ -11,24 +11,24 @@ from docx.shared import Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 
-# --- 新增 V3 依赖 ---
+# --- 新增 V4 依赖 (OpenAI) ---
 import base64
-import asyncio
-import requests # 假设 'requests' 库在环境中可用
+from openai import OpenAI # 导入OpenAI库
 
-# --- 移除 V2 依赖 (阿里云) ---
-ALIYUN_SDK_AVAILABLE = False # 保留变量，但设为False
+# --- 移除 V3 依赖 (Gemini) ---
+# import asyncio
+# import requests
 
 # ==============================================================================
-# --- [核心功能 V3: Gemini Vision API] ---
+# --- [核心功能 V4: OpenAI Vision API] ---
 # ==============================================================================
 
-async def get_gemini_vision_analysis(image: Image.Image) -> dict:
+def get_openai_vision_analysis(image: Image.Image) -> dict:
     """
-    调用 Gemini API (gemini-2.5-flash-preview-09-2025) 来分析图片并返回结构化JSON。
+    调用 OpenAI API (gpt-4o) 来分析图片并返回结构化JSON。
     会从 st.secrets 中读取 API Key。
     """
-    st.write("正在调用 Gemini Vision API...")
+    st.write("正在调用 OpenAI GPT-4o Vision API...")
     
     # 1. 将Pillow Image转为Base64
     buffered = io.BytesIO()
@@ -37,22 +37,51 @@ async def get_gemini_vision_analysis(image: Image.Image) -> dict:
     image.save(buffered, format="JPEG")
     base64_image_data = base64.b64encode(buffered.getvalue()).decode('utf-8')
     
-    # 2. 定义API URL和Key (*** V3.2 修改 ***)
+    # 2. 定义API URL和Key (*** V4.0 修改 ***)
     try:
-        apiKey = st.secrets["gemini"]["api_key"]
+        apiKey = st.secrets["openai"]["api_key"]
     except (KeyError, AttributeError):
-        st.error("操！没在 .streamlit/secrets.toml 里找到 [gemini] -> api_key！")
-        st.code("请在 .streamlit/secrets.toml 文件中添加：\n\n[gemini]\napi_key = \"YOUR_API_KEY_HERE\"\n")
+        st.error("错误：没在 .streamlit/secrets.toml 里找到 [openai] -> api_key！")
+        st.code("请在 .streamlit/secrets.toml 文件中添加：\n\n[openai]\napi_key = \"sk-YOUR_API_KEY_HERE\"\n")
         return None
 
     if not apiKey:
-        st.error("操！你 .streamlit/secrets.toml 里的 api_key 是空的！")
+        st.error("错误：你 .streamlit/secrets.toml 里的 api_key 是空的！")
         return None
-        
-    apiUrl = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={apiKey}"
+    
+    # 3. 初始化 OpenAI 客户端
+    try:
+        client = OpenAI(api_key=apiKey)
+    except Exception as e:
+        st.error(f"初始化 OpenAI 客户端失败: {e}")
+        return None
 
-    # 3. 定义请求Prompt
-    prompt = """
+    # 4. 定义JSON Schema (作为Prompt的一部分)
+    response_schema_example = {
+      "jinling": [
+        {
+          "date": "20/10",
+          "weekday": "一",
+          "expected_today_raw": "78.4%",
+          "actual_today_raw": "83.4%",
+          "expected_monday_raw": "83.4%",
+          "avg_price_raw": "5774"
+        }
+      ],
+      "yatai": [
+        {
+          "date": "20/10",
+          "weekday": "一",
+          "expected_today_raw": "67.4%",
+          "actual_today_raw": "81.4%",
+          "expected_monday_raw": "81.4%",
+          "avg_price_raw": "7069"
+        }
+      ]
+    }
+
+    # 5. 定义请求Prompt (*** V4.0 修改 ***)
+    prompt = f"""
     请分析这张每日出租率对照表的图片。
     图片包含两个表格：'金陵楼' 和 '亚太商务楼'。
     
@@ -63,124 +92,57 @@ async def get_gemini_vision_analysis(image: Image.Image) -> dict:
     4.  请忽略 '当日增加率', '当日实际' (周一的), '增加百分率' 这几列。
     5.  将所有提取的值作为字符串返回，保留原始格式（例如 '83.4%' 或 '5774'）。
     
-    请严格按照下面提供的JSON schema格式返回数据。
+    请**只返回一个JSON对象**，不要包含任何解释性文本或 "```json" 标记。
+    JSON对象必须严格遵循以下结构（这是一个例子，你需要填满7天的数据）：
+    {json.dumps(response_schema_example, indent=2, ensure_ascii=False)}
     """
 
-    # 4. 定义JSON Schema
-    response_schema = {
-      "type": "OBJECT",
-      "properties": {
-        "jinling": {
-          "description": "金陵楼的7天数据",
-          "type": "ARRAY",
-          "items": {
-            "type": "OBJECT",
-            "properties": {
-              "date": { "type": "STRING", "description": "日期, e.g., '20/10'" },
-              "weekday": { "type": "STRING", "description": "星期, e.g., '一'" },
-              "expected_today_raw": { "type": "STRING", "description": "当日预计, e.g., '78.4%'" },
-              "actual_today_raw": { "type": "STRING", "description": "当日实际 (使用手写值), e.g., '83.4%'" },
-              "expected_monday_raw": { "type": "STRING", "description": "周一预计, e.g., '83.4%'" },
-              "avg_price_raw": { "type": "STRING", "description": "平均房价, e.g., '5774'" }
-            },
-            "required": ["date", "weekday", "expected_today_raw", "actual_today_raw", "expected_monday_raw", "avg_price_raw"]
-          }
-        },
-        "yatai": {
-          "description": "亚太商务楼的7天数据",
-          "type": "ARRAY",
-          "items": {
-            "type": "OBJECT",
-            "properties": {
-              "date": { "type": "STRING", "description": "日期, e.g., '20/10'" },
-              "weekday": { "type": "STRING", "description": "星期, e.g., '一'" },
-              "expected_today_raw": { "type": "STRING", "description": "当日预计, e.g., '67.4%'" },
-              "actual_today_raw": { "type": "STRING", "description": "当日实际 (使用手写值), e.g., '81.4%'" },
-              "expected_monday_raw": { "type": "STRING", "description": "周一预计, e.g., '81.4%'" },
-              "avg_price_raw": { "type": "STRING", "description": "平均房价, e.g., '7069'" }
-            },
-            "required": ["date", "weekday", "expected_today_raw", "actual_today_raw", "expected_monday_raw", "avg_price_raw"]
-          }
-        }
-      },
-      "required": ["jinling", "yatai"]
-    }
-
-    # 5. 构建Payload
-    payload = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [
-                    { "text": prompt },
-                    {
-                        "inlineData": {
-                            "mimeType": "image/jpeg",
-                            "data": base64_image_data
-                        }
-                    }
-                ]
-            }
-        ],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "responseSchema": response_schema
-        }
-    }
-
-    # 6. 发起API请求 (带指数退避)
-    max_retries = 5
-    delay = 1
-    for attempt in range(max_retries):
-        try:
-            # 在 Streamlit 中，我们需要在一个单独的线程中运行阻塞的 I/O 操作
-            response = await asyncio.to_thread(
-                lambda: requests.post(
-                    apiUrl,
-                    headers={'Content-Type': 'application/json'},
-                    data=json.dumps(payload),
-                    timeout=60  # 60秒超时
-                )
-            )
+    # 6. 发起API请求 (*** V4.0 修改 ***)
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o", # 使用 gpt-4o
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image_data}"
+                            },
+                        },
+                    ],
+                }
+            ],
+            max_tokens=4096,
+            temperature=0.0, # 低温以保证JSON的稳定性
+            response_format={"type": "json_object"} # 请求JSON对象输出
+        )
+        
+        if response.choices and response.choices[0].message and response.choices[0].message.content:
+            st.write("API 调用成功，正在解析JSON...")
+            json_text = response.choices[0].message.content
             
-            if response.status_code == 200:
-                result = response.json()
-                if (
-                    result.get("candidates") and
-                    result["candidates"][0].get("content", {}).get("parts") and
-                    result["candidates"][0]["content"]["parts"][0].get("text")
-                ):
-                    st.write("API 调用成功，正在解析JSON...")
-                    json_text = result["candidates"][0]["content"]["parts"][0]["text"]
-                    return json.loads(json_text)
-                else:
-                    st.error(f"Gemini API 返回了意外的结构: {result}")
-                    return None
-            elif response.status_code == 429 or response.status_code >= 500:
-                # 触发了重试 (速率限制或服务器错误)
-                st.warning(f"API 返回 {response.status_code}, 正在重试... (第 {attempt + 1}/{max_retries} 次)")
-                await asyncio.sleep(delay)
-                delay *= 2
-            else:
-                # 客户端错误, 不重试
-                st.error(f"Gemini API 请求失败: {response.status_code}")
-                st.error(f"错误详情: {response.text}")
+            # 尝试解析模型返回的JSON
+            try:
+                return json.loads(json_text)
+            except json.JSONDecodeError:
+                st.error(f"OpenAI 返回了无效的JSON: {json_text}")
                 return None
-        except requests.exceptions.Timeout:
-            st.warning(f"API 请求超时, G正在重试... (第 {attempt + 1}/{max_retries} 次)")
-            await asyncio.sleep(delay)
-            delay *= 2
-        except Exception as e:
-            st.error(f"调用 Gemini API 失败: {e}")
-            st.code(traceback.format_exc())
+        else:
+            st.error(f"OpenAI API 返回了意外的结构: {response}")
             return None
-            
-    st.error(f"API 请求在 {max_retries} 次重试后失败。")
-    return None
+
+    except Exception as e:
+        st.error(f"调用 OpenAI API 失败: {e}")
+        st.code(traceback.format_exc())
+        return None
 
 def populate_dataframe_from_json(ocr_data: dict, building_name: str) -> pd.DataFrame:
     """
-    V3: 使用 Gemini 返回的结构化 JSON 来填充 DataFrame。
+    V3/V4: 使用 AI 返回的结构化 JSON 来填充 DataFrame。
+    (此函数无需修改)
     """
     
     # 1. 准备一个空的默认DataFrame
@@ -200,13 +162,13 @@ def populate_dataframe_from_json(ocr_data: dict, building_name: str) -> pd.DataF
 
     # 2. 检查
     if not ocr_data:
-        st.warning("Gemini Vision 未返回数据。")
+        st.warning("AI Vision 未返回数据。")
         return df
 
     building_key = "jinling" if building_name == "金陵楼" else "yatai"
     
     if building_key not in ocr_data:
-        st.warning(f"在Gemini的JSON响应中未找到 '{building_key}' 键。")
+        st.warning(f"在AI的JSON响应中未找到 '{building_key}' 键。")
         return df
         
     building_data = ocr_data[building_key]
@@ -231,7 +193,7 @@ def populate_dataframe_from_json(ocr_data: dict, building_name: str) -> pd.DataF
             st.error(f"填充第 {i} 行数据时出错: {e}")
             continue
             
-    st.write(f"成功从Gemini JSON填充了 '{building_name}' 的 {min(len(building_data), 7)} 行数据。")
+    st.write(f"成功从OpenAI JSON填充了 '{building_name}' 的 {min(len(building_data), 7)} 行数据。")
     return df
 
 # ==============================================================================
@@ -383,43 +345,43 @@ def create_word_doc(jl_df, yt_df, jl_summary, yt_summary):
         return None
 
 # ==============================================================================
-# --- [Streamlit 界面 V3] ---
+# --- [Streamlit 界面 V4] ---
 # ==============================================================================
 def run_ocr_calculator_app():
-    st.title("OCR出租率计算器 (V3 - Gemini Vision)")
+    st.title("OCR出租率计算器 (V4 - OpenAI Vision)")
     st.markdown("1. 上传手写表格的照片。")
-    st.markdown("2. 使用 **Gemini Vision API** 智能解析表格（优先读取手写值）。")
+    st.markdown("2. 使用 **OpenAI GPT-4o API** 智能解析表格（优先读取手写值）。")
     st.markdown("3. **人工核对**下方的可编辑表格，修正识别错误的数字。")
     st.markdown("4. 点击“计算”按钮，生成最终报表并下载Word文档。")
 
-    uploaded_file = st.file_uploader("上传图片文件", type=["png", "jpg", "jpeg", "bmp"], key="ocr_calc_uploader_v3") # 新Key
+    uploaded_file = st.file_uploader("上传图片文件", type=["png", "jpg", "jpeg", "bmp"], key="ocr_calc_uploader_v4") # 新Key
 
     if uploaded_file:
         image = Image.open(uploaded_file)
         st.image(image, caption="上传的图片", width=300)
 
-        if st.button("开始识别 (Gemini Vision)", type="primary"): # 新按钮
-            with st.spinner('正在调用 Gemini Vision API (这可能需要一些时间)...'):
+        if st.button("开始识别 (OpenAI Vision)", type="primary"): # 新按钮
+            with st.spinner('正在调用 OpenAI Vision API (这可能需要一些时间)...'):
                 
-                # 在 Streamlit 中运行异步函数
+                # *** V4.0: 使用同步的 OpenAI 调用 ***
                 try:
-                    ocr_data = asyncio.run(get_gemini_vision_analysis(image))
+                    ocr_data = get_openai_vision_analysis(image)
                 except Exception as e:
-                    st.error(f"运行异步Gemini任务时出错: {e}")
+                    st.error(f"运行OpenAI任务时出错: {e}")
                     ocr_data = None
                 
                 if ocr_data:
                     st.session_state.ocr_data = ocr_data
                     st.info("API调用成功，正在解析返回的JSON...")
-                    # *** V3: 使用新的解析函数 ***
+                    # *** V3/V4: 使用通用的解析函数 ***
                     st.session_state.jl_df = populate_dataframe_from_json(ocr_data, "金陵楼")
                     st.session_state.yt_df = populate_dataframe_from_json(ocr_data, "亚太商务楼")
                     st.success("解析完成！请检查下面的表格，手动修正错误。")
                     
-                    with st.expander("查看 Gemini 返回的原始JSON数据"):
+                    with st.expander("查看 OpenAI 返回的原始JSON数据"):
                         st.json(ocr_data)
                 else:
-                    st.error("Gemini API 未返回有效数据。")
+                    st.error("OpenAI API 未返回有效数据。")
                     st.session_state.jl_df = populate_dataframe_from_json(None, "金陵楼") # 生成空表
                     st.session_state.yt_df = populate_dataframe_from_json(None, "亚太商务楼")
     
@@ -438,7 +400,7 @@ def run_ocr_calculator_app():
                 "星期": st.column_config.TextColumn(label="星期", disabled=True),
             },
             num_rows="fixed",
-            key="editor_jl_v3" # 新Key
+            key="editor_jl_v4" # 新Key
         )
         
         st.subheader("亚太商务楼 (请在此处编辑)")
@@ -453,7 +415,7 @@ def run_ocr_calculator_app():
                 "星期": st.column_config.TextColumn(label="星期", disabled=True),
             },
             num_rows="fixed",
-            key="editor_yt_v3" # 新Key
+            key="editor_yt_v4" # 新Key
         )
 
         if st.button("重新计算最终结果", type="primary"):
@@ -510,13 +472,13 @@ def run_ocr_calculator_app():
             st.download_button(
                 label="下载Word文档",
                 data=doc_data,
-                file_name="每日出租率对照表_V3_Gemini.docx", # 新文件名
+                file_name="每日出租率对照表_V4_OpenAI.docx", # 新文件名
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
 
 # --- 主程序入口 ---
 if __name__ == "__main__":
     # 设置页面标题
-    st.set_page_config(page_title="OCR出租率计算器 V3")
+    st.set_page_config(page_title="OCR出租率计算器 V4")
     run_ocr_calculator_app()
 
